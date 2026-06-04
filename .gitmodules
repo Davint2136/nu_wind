@@ -1,0 +1,7 @@
+[submodule "PyCompOSE"]
+	path = PyCompOSE
+	url = https://github.com/computationalrelativity/PyCompOSE.git
+[submodule "bns_nurates"]
+	path = bns_nurates
+	url = https://github.com/RelNucAs/bns_nurates.git
+	branch = sycl-kokkos-math-compat-v2
