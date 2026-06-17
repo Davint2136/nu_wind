@@ -35,23 +35,71 @@ class Solver:
         self.opacity_params = opacity_params
 
 
-    def compute_t(self):
+    def temperature_from_e(self, nb : np.ndarray, ye : np.ndarray, e_val : float):
+        """
+            Given an eos table, nb, ye, and energy density e, calculates the temperature of the fluid. Uses linear interpolation.
+
+            Inputs:
+                table [compose.eos.Table]: An EOS table whose nb, yq, and t arrays are not empty. A non-empty thermo["Q7"] table must exist in the EOS Table object as well.
+                nb [np.NDArray]: A 1D array consisting of one baryon number density in fm^-3.
+                ye [np.NDArray]: A 1D array consisting of one charge fraction.
+                e_val [float]: The fluid's energy density in MeV/fm^3.
+
+            Outputs:
+                t [float]: The fluid temperature in MeV.
+        """
+        from scipy.optimize import bisect
+
+        new_nb = np.array([nb])
+        new_ye = np.array([ye])
+
+        # Find difference between calculated e and actual e
+        def f(t):
+            interp = self.table.interpolate(nb, ye, np.array([t]), method='linear')
+            e_table = (interp.thermo["Q7"] + 1) * interp.mn * nb
+            return e_val - e_table[0, 0, 0]
+
+        # Use a bisection method to find root of f. 
+        try:
+            t = bisect(f, self.table.t[0], self.table.t[-1], disp=True)
+        except RuntimeError:
+            print("temperature_from_e could not converge to a temperature.")
         
-        pass
+        return t
     
     def get_potentials(self):
-        pass
+        """
+            Calculates the proton, neutron, and electron chemical potentials for the current state.
+
+            Outputs:
+                mu_p [float]: The proton chemical potential [MeV]
+                mu_n [float]: The neutron chemical potential [MeV]
+                mu_e [float]: The electron chemical potential [MeV]
+        """
+        interp = self.table.interpolate3D(self.states[-1].nb, self.states[-1].ye, self.states[-1].t, method='linear')
+        mu_b = (self.table.thermo["Q3"][0, 0, 0] + 1) * self.table.mn
+        mu_q = self.table.thermo["Q4"][0, 0, 0] * self.table.mn
+        mu_l = self.table.thermo["Q5"][0, 0, 0] * self.table.mn
+
+        mu_p = mu_b + mu_q
+        mu_n = mu_b
+        mu_e = mu_l - mu_q
+
+        return mu_p, mu_n, mu_e
 
     def calculate_corrector_quantities(self):
+        # TODO: Use eos.micro to find dirac effective masses to calculate dm_eff, don't attempt dU for now
         pass
 
     def calculate_rates(self):
+        # TODO: Extremely similar to bns_nurates' test_bindings.py. Use the same code structure
         pass
 
     def calculate_source_terms(self):
         pass
 
     def integrate_step(self):
+        # TODO: Build and test RK2 integrator before implementing anything here. Best to do this in a separate file.
         pass
 
 
