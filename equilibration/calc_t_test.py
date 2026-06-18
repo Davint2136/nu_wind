@@ -51,6 +51,10 @@ md = Metadata(
     },
     quads = {
         999: ("N", "average nucleous")
+    },
+    micro={
+        10041: ("mn_d", "neutron dirac effective mass divided by neutron mass"),
+        11041: ("mp_d", "proton dirac effective mass divided by proton mass")
     }
 )
 eos = Table(md)
