@@ -22,8 +22,6 @@ def temperature_from_e(table : Table, nb : np.ndarray, ye : np.ndarray, e_val : 
         Outputs:
             t [float]: The fluid temperature in MeV.
     """
-    new_nb = np.array([nb])
-    new_ye = np.array([ye])
 
     # Find difference between calculated e and actual e
     def f(t):
@@ -70,9 +68,12 @@ eos.restrict_idx(it1=-1)
 eos.shrink_to_valid_nb()
 
 #Generate test point using point F of chiesa et. al. 2025
-nb = 4.208366627847035e+38 * 1e-39 #fm^-3
-ye = 0.07
-t = 12.39 # MeV
-test_table = eos.interpolate(np.array([nb]), np.array([0.07]), np.array([t]), method='linear')
-fluid_e = (test_table.thermo["Q7"][0, 0, 0] + 1) * test_table.mn * test_table.nb[0]
-print(temperature_from_e(eos, np.array([nb]), np.array([ye]), fluid_e))
+nb = 4.208366627847035e+38 #cm^-3
+ye = 0.07158458232879639
+t = 12.406403541564941 # MeV
+test_table = eos.interpolate(np.array([nb]) * 1e-39, np.array([0.07]), np.array([t]), method='linear')
+fluid_e = (test_table.thermo["Q7"][0, 0, 0] + 1) * test_table.mn * test_table.nb[0] * 1e39
+print(fluid_e)
+temp = temperature_from_e(eos, np.array([nb]) * 1e-39, np.array([ye]), fluid_e * 1e-39)
+print(temp)
+print(f"Temperature error: {np.abs(t - temp)}")
