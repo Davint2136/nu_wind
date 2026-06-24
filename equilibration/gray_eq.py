@@ -8,7 +8,7 @@ from copy import deepcopy
 
 class State:
     """Class showing the state of the simulation."""
-    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1):
+    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, dU):
         self.nb = nb                                        # Baryon number density [cm-3]
         self.ye = ye                                        # Electron fraction
         self.xn = 1. - ye                                   # Neutron fraction
@@ -23,8 +23,10 @@ class State:
         self.mu_n = None                                    # Neutron Chemical Potential [MeV]
         self.source_terms = {"edot" : None, "ndot" : None}  # Neutrino transport source terms [MeV cm-3 s-1, cm-3 s-1]
         self.rates = None                                   # Neutrino reaction rates 
+        self.mp_eff = None
+        self.mn_eff = None
         self.dm_eff = None                                  # Nucleon effective mass difference [MeV]
-        self.dU = None                                      # Nucleon interaction potential difference [MeV]
+        self.dU = dU                                      # Nucleon interaction potential difference [MeV]
 
 
 class Solver:
@@ -78,7 +80,7 @@ class Solver:
         """
         current_state = self.states[-1]
 
-        interp = self.table.interpolate3D(np.array([current_state.nb]) * 1e-39, np.array([current_state.ye]), np.array([current_state.t]), method='linear')
+        interp = self.table.interpolate_3D(np.array([current_state.nb]) * 1e-39, np.array([current_state.ye]), np.array([current_state.t]), method='linear')
         mu_b = (interp.thermo["Q3"][0, 0, 0] + 1) * interp.mn
         mu_q = interp.thermo["Q4"][0, 0, 0] * interp.mn
         mu_l = interp.thermo["Q5"][0, 0, 0] * interp.mn
@@ -93,11 +95,11 @@ class Solver:
         # TODO: Use eos.micro to find dirac effective masses to calculate dm_eff, don't attempt dU for now
         current_state = self.states[-1]
 
-        interp = self.table.interpolate3D(np.array([current_state.nb]) * 1e-39, np.array([current_state.ye]), np.array([current_state.t]), method='linear')
-        mn_eff = interp.micro["mn_d"][0, 0, 0]
-        mp_eff = interp.micro["mp_d"][0, 0, 0]
+        interp = self.table.interpolate_3D(np.array([current_state.nb]) * 1e-39, np.array([current_state.ye]), np.array([current_state.t]), method='linear')
+        mn_eff = interp.qK["mn_d"][0, 0, 0] * interp.mn
+        mp_eff = interp.qK["mp_d"][0, 0, 0] * interp.mp
         dm_eff = mn_eff - mp_eff
-        return dm_eff
+        return mp_eff, mn_eff, dm_eff
 
     def calculate_gray_rates(self):
         # TODO: Extremely similar to bns_nurates' test_bindings.py. Use the same code structure
@@ -108,12 +110,13 @@ class Solver:
         eos_pars.nb = current_state.nb * 1e-21 # Convert baryon number density to nm^-3
         eos_pars.temp = current_state.t
         eos_pars.ye = current_state.ye
-        eos_pars.xn = 1 - eos_pars.ye
-        eos_pars.xp = eos_pars.ye
+        eos_pars.yn = 1 - eos_pars.ye
+        eos_pars.yp = eos_pars.ye
         eos_pars.mu_n = current_state.mu_n
         eos_pars.mu_e = current_state.mu_e
         eos_pars.mu_p = current_state.mu_p
         eos_pars.dm_eff = current_state.dm_eff
+        eos_pars.dU = current_state.dU
 
         #Create a quadrature, populate it with data for a Gauss-Legendre quadrature
         quad = bns.cvar.quadrature_default
@@ -141,12 +144,28 @@ class Solver:
         grey_pars.m1_pars = m1_pars
 
         #Calculate rates
-        grey_rates = bns.ComputeM1Opacities(quad, quad, grey_pars)
-
-        return grey_rates
+        gray_rates = bns.ComputeM1Opacities(quad, quad, grey_pars)
+        gray_rates['eta']       = [x * 1e21 for x in gray_rates['eta']]
+        gray_rates['eta_0']     = [x * 1e21 for x in gray_rates['eta_0']]
+        gray_rates['kappa_a']   = [x * 1e7  for x in gray_rates['kappa_a']]
+        gray_rates['kappa_0_a'] = [x * 1e7  for x in gray_rates['kappa_0_a']]
+        gray_rates['kappa_s']   = [x * 1e7  for x in gray_rates['kappa_s']]
+        return gray_rates
 
     def calculate_source_terms(self):
-        pass
+        rates = self.states[-1].rates
+        J_m1 = self.states[-1].J_m1
+        n_m1 = self.states[-1].n_m1
+
+        e_terms = [None, None, None, None]
+        n_terms = [None, None, None, None]
+
+        for i in range(0, 4):
+            edot = rates["eta"][i] - (rates["kappa_a"][i] * J_m1[i])
+            ndot = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
+        
+
+        return {"edot" : edot, "ndot" : ndot}
 
     def integrate_step(self):
         # TODO: Build and test RK2 integrator before implementing anything here. Best to do this in a separate file.
@@ -210,17 +229,25 @@ n_m1 = [3.739749408027436e+33, 1.2174961961689319e+35, 2.2438496448164613e+34, 2
 J_m1 = [1.246583136009145e+35,  5.360307484839323e+36,  8.726081952064015e+35,  8.726081952064015e+35]  # Neutrino energy densities [MeV cm-3]
 chi_m1  = [1./3., 1./3., 1./3., 1./3.]  # Eddington factor
 
-init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1)
+init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
-opacity_pars = {'use_dU': True, 'use_dm_eff': False, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
+opacity_pars = {'use_dU': True, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
 solver = Solver(eos, init_state, None, opacity_flags, opacity_pars)
 solver.states[-1].t = solver.temperature_from_e(solver.states[-1].nb * 1e-39, solver.states[-1].ye, solver.states[-1].fluid_e * 1e-39)
-print(solver.states[-1].t)
 
 """TODO: temperature_from_var is close, but not close enough for my liking. For point A of Chiesa et al. 2025, the difference between the computed
          temperature and the actual temperature is around 0.034 MeV. This is close, but provided that some quantities like neutrino energy and number
          densities are sensitive to temperature, I'd like the difference to be smaller. Changing scipy.optimize.bisect's tolerances should help, 
          but the performance impact needs to be measured as well.
+
+    NOTE: Changing the tolerances did nothing. This is most likely an interpolation error issue. I'll leave this be for now.
 """
+
+solver.states[-1].mu_p, solver.states[-1].mu_n, solver.states[-1].mu_e = solver.get_potentials()
+solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff = solver.calculate_corrector_quantities()
+print(solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff) #These differ from Point A of Chiesa et al. 2025, dm_eff should be orders of magnitude larger. EOS related? Interpolator error?
+solver.states[-1].rates = solver.calculate_gray_rates()
+bns.print_integrated_rates(solver.states[-1].rates)
+
