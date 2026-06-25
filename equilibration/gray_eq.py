@@ -116,7 +116,6 @@ class Solver:
         eos_pars.mu_e = current_state.mu_e
         eos_pars.mu_p = current_state.mu_p
         eos_pars.dm_eff = current_state.dm_eff
-        eos_pars.dU = current_state.dU
 
         #Create a quadrature, populate it with data for a Gauss-Legendre quadrature
         quad = bns.cvar.quadrature_default
@@ -158,21 +157,23 @@ class Solver:
 
         e_terms = [None, None, None, None]
 
-        for i in range(0, 4):
-            edot = rates["eta"][i] - (rates["kappa_a"][i] * J_m1[i])
+        for i in range(0, 3):
+            e_terms[i] = rates["eta"][i] - (rates["kappa_a"][i] * J_m1[i])
+            
         
 
-        return np.array([edot])
+        return np.array([e_terms])
     
     def calculate_n_source_terms(self, n_m1):
         rates = self.states[-1].rates
 
         n_terms = [None, None, None, None]
 
-        for i in range(0, 4):
-            ndot = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
+        for i in range(0, 3):
+            print(rates["kappa_0_a"][i], n_m1[i])
+            n_terms[i] = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
         
-        return np.array([ndot])
+        return np.array([n_terms])
 
     def integrate_step(self):
         # TODO: Build and test RK2 integrator before implementing anything here. Best to do this in a separate file.
@@ -265,7 +266,7 @@ chi_m1  = [1./3., 1./3., 1./3., 1./3.]  # Eddington factor
 init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
-opacity_pars = {'use_dU': True, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
+opacity_pars = {'use_dU': False, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
 solver = Solver(eos, init_state, None, opacity_flags, opacity_pars)
 solver.states[-1].t = solver.temperature_from_e(solver.states[-1].nb * 1e-39, solver.states[-1].ye, solver.states[-1].fluid_e * 1e-39)
@@ -282,8 +283,7 @@ solver.states[-1].t = solver.temperature_from_e(solver.states[-1].nb * 1e-39, so
 
 solver.states[-1].mu_p, solver.states[-1].mu_n, solver.states[-1].mu_e = solver.get_potentials()
 solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff = solver.calculate_corrector_quantities()
-print(solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff) #These differ from Point A of Chiesa et al. 2025, dm_eff should be orders of magnitude larger. EOS related? Interpolator error?
 solver.states[-1].rates = solver.calculate_gray_rates()
 bns.print_integrated_rates(solver.states[-1].rates)
-solver.integrate_step()
+print(solver.integrate_step())
 
