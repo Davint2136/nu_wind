@@ -8,7 +8,7 @@ from copy import deepcopy
 
 class State:
     """Class showing the state of the simulation."""
-    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, dU):
+    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1):
         self.nb = nb                                        # Baryon number density [cm-3]
         self.ye = ye                                        # Electron fraction
         self.xn = 1. - ye                                   # Neutron fraction
@@ -21,13 +21,13 @@ class State:
         self.mu_e = None                                    # Electron chemical potential [MeV]
         self.mu_p = None                                    # Proton chemical potential [MeV]
         self.mu_n = None                                    # Neutron Chemical Potential [MeV]
-        self.source_terms = {"edot" : None, "ndot" : None}  # Neutrino transport source terms [MeV cm-3 s-1, cm-3 s-1]
+        edot_sources = None                                 # Neutrino energy density source terms for integration [MeV cm-3 s-1]
+        ndot_sources = None                                 # Neutrino number density source terms for integration [cm-3 s-1]
         self.rates = None                                   # Neutrino reaction rates 
-        self.mp_eff = None
-        self.mn_eff = None
+        self.mp_eff = None                                  # Dirac effective proton mass [MeV]
+        self.mn_eff = None                                  # Dirac effective neutron mass [MeV]
         self.dm_eff = None                                  # Nucleon effective mass difference [MeV]
-        self.dU = dU                                      # Nucleon interaction potential difference [MeV]
-
+        self.t = 0.0                                        # Time at which the state occurs during the simulation [s]
 
 class Solver:
     def __init__(self, table, state, integrate_tolerance, opacity_flags, opacity_pars):
@@ -45,9 +45,9 @@ class Solver:
 
             Inputs:
                 table [compose.eos.Table]: An EOS table whose nb, yq, and t arrays are not empty. A non-empty thermo["Q7"] table must exist in the EOS Table object as well.
-                nb [float]: Baryon number density in cm^-3.
+                nb [float]: Baryon number density in fm^-3.
                 ye [float]: Unitless charge fraction.
-                e_val [float]: The fluid's energy density in MeV/cm^3.
+                e_val [float]: The fluid's energy density in MeV/fm^3.
 
             Outputs:
                 t [float]: The fluid temperature in MeV.
@@ -152,24 +152,57 @@ class Solver:
         gray_rates['kappa_s']   = [x * 1e7  for x in gray_rates['kappa_s']]
         return gray_rates
 
-    def calculate_source_terms(self):
+    def calculate_e_source_terms(self, J_m1):
         rates = self.states[-1].rates
         J_m1 = self.states[-1].J_m1
-        n_m1 = self.states[-1].n_m1
 
         e_terms = [None, None, None, None]
-        n_terms = [None, None, None, None]
 
         for i in range(0, 4):
             edot = rates["eta"][i] - (rates["kappa_a"][i] * J_m1[i])
-            ndot = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
         
 
-        return {"edot" : edot, "ndot" : ndot}
+        return np.array([edot])
+    
+    def calculate_n_source_terms(self, n_m1):
+        rates = self.states[-1].rates
+
+        n_terms = [None, None, None, None]
+
+        for i in range(0, 4):
+            ndot = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
+        
+        return np.array([ndot])
 
     def integrate_step(self):
         # TODO: Build and test RK2 integrator before implementing anything here. Best to do this in a separate file.
-        pass
+        # Calculate timestep
+        current_state = self.states[-1]
+        c = 29979245800.0
+        timestep = 0.01 * ((1 / max(current_state.rates["kappa_a"] + current_state.rates["kappa_0_a"])) / c)
+
+        #Calculate source terms for current state
+        current_state.edot_sources = self.calculate_e_source_terms(current_state.J_m1)
+        current_state.ndot_sources = self.calculate_n_source_terms(current_state.n_m1)
+
+        #Calculate k1 for RK2
+        k1_e = timestep * current_state.edot_sources
+        k1_n = timestep * current_state.ndot_sources
+
+        #Calculate source terms at midpoint of timestep
+        mid_edot_sources = self.calculate_e_source_terms((np.array([current_state.J_m1]) + (k1_e / 2)).tolist())
+        mid_ndot_sources = self.calculate_n_source_terms((np.array([current_state.n_m1]) + (k1_n / 2)).tolist())
+
+        #Calculate k2 for RK2
+        k2_e = timestep * mid_edot_sources
+        k2_n = timestep * mid_ndot_sources
+
+        #Calculate fluid energy density and electron fraction at the next timestep
+        next_e = -(np.sum(current_state.edot_sources + k2_e))
+        next_ye = ((current_state.ndot_sources[1] * k2_n[1]) - (current_state.ndot_sources[0] * k2_n[0])) / current_state.nb
+
+        next_t = current_state.t + timestep
+        return next_e, next_ye, next_t
 
     #TODO: Add a create_state function to make State objects?
 
@@ -229,7 +262,7 @@ n_m1 = [3.739749408027436e+33, 1.2174961961689319e+35, 2.2438496448164613e+34, 2
 J_m1 = [1.246583136009145e+35,  5.360307484839323e+36,  8.726081952064015e+35,  8.726081952064015e+35]  # Neutrino energy densities [MeV cm-3]
 chi_m1  = [1./3., 1./3., 1./3., 1./3.]  # Eddington factor
 
-init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU)
+init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
 opacity_pars = {'use_dU': True, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
@@ -242,7 +275,9 @@ solver.states[-1].t = solver.temperature_from_e(solver.states[-1].nb * 1e-39, so
          densities are sensitive to temperature, I'd like the difference to be smaller. Changing scipy.optimize.bisect's tolerances should help, 
          but the performance impact needs to be measured as well.
 
-    NOTE: Changing the tolerances did nothing. This is most likely an interpolation error issue. I'll leave this be for now.
+    NOTE: Changing the tolerances did nothing. This is most likely an interpolation issue. I'll leave this be for now.
+
+    NOTE: Upon calculating reaction rates, leaving the error be is ok. The reaction rates calculated in this code using PyCompOSE and BNS_NURATES are close to those calculated in test_bindings.py in BNS_NURATES.
 """
 
 solver.states[-1].mu_p, solver.states[-1].mu_n, solver.states[-1].mu_e = solver.get_potentials()
@@ -250,4 +285,5 @@ solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff = s
 print(solver.states[-1].mp_eff, solver.states[-1].mn_eff, solver.states[-1].dm_eff) #These differ from Point A of Chiesa et al. 2025, dm_eff should be orders of magnitude larger. EOS related? Interpolator error?
 solver.states[-1].rates = solver.calculate_gray_rates()
 bns.print_integrated_rates(solver.states[-1].rates)
+solver.integrate_step()
 
