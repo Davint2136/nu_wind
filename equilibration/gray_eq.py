@@ -92,7 +92,7 @@ class Solver:
         return mu_p, mu_n, mu_e
 
     def calculate_corrector_quantities(self):
-        # TODO: Use eos.micro to find dirac effective masses to calculate dm_eff, don't attempt dU for now
+        #Use eos.micro to find dirac effective masses to calculate dm_eff, don't attempt dU for now
         current_state = self.states[-1]
 
         interp = self.table.interpolate_3D(np.array([current_state.nb]) * 1e-39, np.array([current_state.ye]), np.array([current_state.t]), method='linear')
@@ -102,7 +102,6 @@ class Solver:
         return mp_eff, mn_eff, dm_eff
 
     def calculate_gray_rates(self):
-        # TODO: Extremely similar to bns_nurates' test_bindings.py. Use the same code structure
         
         #Initialize eos_pars and populate
         current_state = self.states[-1]
@@ -176,7 +175,6 @@ class Solver:
         return np.array([n_terms])
 
     def integrate_step(self):
-        # TODO: Build and test RK2 integrator before implementing anything here. Best to do this in a separate file.
         # Calculate timestep
         current_state = self.states[-1]
         c = 29979245800.0
@@ -204,8 +202,6 @@ class Solver:
 
         next_t = current_state.t + timestep
         return next_e, next_ye, next_t
-
-    #TODO: Add a create_state function to make State objects?
 
 
 
