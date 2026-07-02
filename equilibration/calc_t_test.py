@@ -15,7 +15,7 @@ def temperature_from_e(table : Table, nb : np.ndarray, ye : np.ndarray, e_val : 
 
         Inputs:
             table [compose.eos.Table]: An EOS table whose nb, yq, and t arrays are not empty. A non-empty thermo["Q7"] table must exist in the EOS Table object as well.
-            nb [np.NDArray]: A 1D array consisting of one baryon number density in fm^-3.
+            nb [np.NDArray]: A 1D array consisting of one baryon number density in cm^-3.
             ye [np.NDArray]: A 1D array consisting of one charge fraction.
             e_val [float]: The fluid's energy density in MeV/fm^3.
 
@@ -23,11 +23,11 @@ def temperature_from_e(table : Table, nb : np.ndarray, ye : np.ndarray, e_val : 
             t [float]: The fluid temperature in MeV.
     """
 
+    log_e = np.log((table.thermo["Q7"] + 1) * table.mn * nb[0] * 1e-39)
     # Find difference between calculated e and actual e
     def f(t):
-        interp = table.interpolate(nb, ye, np.array([t]), method='linear')
-        e_table = (interp.thermo["Q7"] + 1) * interp.mn * nb
-        return e_val - e_table[0, 0, 0]
+        e_interp = table.eval_given_rtx(log_e, nb * 1e-39, ye, np.array([t]), method="linear")[0]
+        return np.log(e_val * 1e-39) - e_interp
 
     # Use a bisection method to find root of f. 
     try:
@@ -67,13 +67,29 @@ eos.validate()
 eos.restrict_idx(it1=-1)
 eos.shrink_to_valid_nb()
 
-#Generate test point using point F of chiesa et. al. 2025
-nb = 4.208366627847035e+38 #cm^-3
-ye = 0.07158458232879639
-t = 12.406403541564941 # MeV
-test_table = eos.interpolate(np.array([nb]) * 1e-39, np.array([0.07]), np.array([t]), method='linear')
-fluid_e = (test_table.thermo["Q7"][0, 0, 0] + 1) * test_table.mn * test_table.nb[0] * 1e39
-print(fluid_e)
-temp = temperature_from_e(eos, np.array([nb]) * 1e-39, np.array([ye]), fluid_e * 1e-39)
-print(temp)
+#Test using an actual gridpoint on the table, good result (difference between actual vs calculated T is O(1e-10))
+
+nb   = 4.208366627847035e+38  # Baryon number density [cm-3]           
+t = 12.406403541564941     # Temperature [MeV]
+ye   = 0.07158458232879639    # Electron fraction
+print(nb * 1e-39 * eos.unit_dens)
+
+inb = np.argmin(np.abs(eos.nb - (nb * 1e-39)))
+iye = np.argmin(np.abs(eos.yq - ye))
+it = np.argmin(np.abs(eos.t - t))
+
+log_e = np.log((eos.thermo["Q7"] + 1) * eos.mn * nb * 1e-39)
+e_val = np.exp(eos.eval_given_rtx(log_e, np.array([nb]) * 1e-39, np.array([ye]), np.array([t]))[0]) * 1e39
+print(e_val)
+
+temp = temperature_from_e(eos, np.array([nb]), np.array([ye]), e_val)
+print(f"Calculated temperature: {temp}")
+print(f"Actual temperature: {t}")
 print(f"Temperature error: {np.abs(t - temp)}")
+
+"""
+log_e = np.log((eos.thermo["Q7"] + 1) * eos.mn * nb * 1e-39)
+e_val = np.exp(eos.eval_given_rtx(log_e, np.array([nb]) * 1e-39, np.array([ye]), np.array([t])))[0] * 1e39
+print(e_val)
+temp = temperature_from_e(eos, np.array([nb]) * 1e-39, np.array([ye]), e_val *1e-39)
+"""

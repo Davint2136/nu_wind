@@ -4,11 +4,13 @@ import os
 import sys
 from compose.eos import Metadata, Table
 from copy import deepcopy
+from os import system, name
+from scipy.optimize import bisect
 
 
 class State:
     """Class showing the state of the simulation."""
-    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1):
+    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, time = 0.0):
         self.nb = nb                                        # Baryon number density [cm-3]
         self.ye = ye                                        # Electron fraction
         self.xn = 1. - ye                                   # Neutron fraction
@@ -27,10 +29,10 @@ class State:
         self.mp_eff = None                                  # Dirac effective proton mass [MeV]
         self.mn_eff = None                                  # Dirac effective neutron mass [MeV]
         self.dm_eff = None                                  # Nucleon effective mass difference [MeV]
-        self.time = 0.0                                        # Time at which the state occurs during the simulation [s]
+        self.time = time                                    # Time at which the state occurs during the simulation [s]
 
 class Solver:
-    def __init__(self, table, state, integrate_tolerance, opacity_flags, opacity_pars):
+    def __init__(self, table : Table, state : State, integrate_tolerance : float, opacity_flags : dict, opacity_pars : dict):
         self.timestep = None
         self.integrate_tolerance = integrate_tolerance
         self.table = table
@@ -39,27 +41,25 @@ class Solver:
         self.opacity_pars = opacity_pars
 
 
-    def temperature_from_e(self, nb : float, ye : float, e_val : float):
+    def temperature_from_e(self, nb : np.ndarray, ye : np.ndarray, e_val : float):
         """
             Given an eos table, nb, ye, and energy density e, calculates the temperature of the fluid. Uses linear interpolation.
 
             Inputs:
                 table [compose.eos.Table]: An EOS table whose nb, yq, and t arrays are not empty. A non-empty thermo["Q7"] table must exist in the EOS Table object as well.
-                nb [float]: Baryon number density in fm^-3.
-                ye [float]: Unitless charge fraction.
-                e_val [float]: The fluid's energy density in MeV/fm^3.
+                nb [np.NDArray]: A 1D array consisting of one baryon number density in cm^-3.
+                ye [np.NDArray]: A 1D array consisting of one charge fraction.
+                e_val [float]: The fluid's energy density in MeV/cm^3.
 
             Outputs:
                 t [float]: The fluid temperature in MeV.
         """
-        from scipy.optimize import bisect
 
-        # Find difference between calculated e and actual e. Ensure lengths are in fm for PyCompOSE compatibility.
+        log_e = np.log((self.table.thermo["Q7"] + 1) * self.table.mn * nb[0] * 1e-39)
+        # Find difference between calculated e and actual e
         def f(t):
-            interp = self.table.interpolate(np.array([nb]), np.array([ye]), np.array([t]), method='linear')
-            e_table = (interp.thermo["Q7"] + 1) * interp.mn * nb
-            return e_val - e_table[0, 0, 0]
-
+            e_interp = self.table.eval_given_rtx(log_e, nb * 1e-39, ye, np.array([t]), method="linear")[0]
+            return np.log(e_val * 1e-39) - e_interp
 
         # Use a bisection method to find root of f. 
         try:
@@ -165,7 +165,7 @@ class Solver:
         gray_rates['kappa_s']   = [x * 1e7  for x in gray_rates['kappa_s']]
         return gray_rates
 
-    def calculate_e_source_terms(self, J_m1):
+    def calculate_e_source_terms(self, J_m1 : list):
         """
             Calculates the neutrino energy density source terms needed for numerical integration based on the conditions in the current simulation state.
 
@@ -173,7 +173,7 @@ class Solver:
                 J_m1 [list]: list of neutrino energy densities sorted by species in the format [nue, anue, nux, anux]
             
             Outputs:
-                e_terms [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
+                [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
         """
 
         rates = self.states[-1].rates
@@ -184,15 +184,15 @@ class Solver:
 
         return np.array(e_terms)
     
-    def calculate_n_source_terms(self, n_m1):
+    def calculate_n_source_terms(self, n_m1 : list):
         """
             Calculates the neutrino number density source terms needed for numerical integration based on the conditions in the current simulation state.
 
             Inputs:
-                J_m1 [list]: list of neutrino number densities sorted by species in the format [nue, anue, nux, anux]
+                n_m1 [list]: list of neutrino number densities sorted by species in the format [nue, anue, nux, anux]
             
             Outputs:
-                e_terms [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
+                [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
         """
         rates = self.states[-1].rates
         n_terms = [None, None, None, None]
@@ -201,6 +201,21 @@ class Solver:
             n_terms[i] = rates["eta_0"][i] - (rates["kappa_0_a"][i] * n_m1[i])
 
         return np.array(n_terms)
+
+    def generate_new_state(self, nb : float, ye : float, fluid_e : float, time : float):
+        """
+            Given a number density, electron fraction, and energy density, creates a new State object.
+
+            Inputs:
+                nb [float]: The fluid's baryon number density [cm-3].
+                ye [float]: The fluid's electron fraction.
+                fluid_e [float]: The fluid's energy density [MeV cm-3]
+                time [float]: The current time in the simulation for the new state.
+            
+            Outputs:
+                [State]: A new state object containing the inputted values. n_m1, J_m1, and chi_m1 from the previous state persist into the new State object.
+        """
+        return State(nb, ye, fluid_e, self.states[-1].n_m1, self.states[-1].J_m1, self.states[-1].chi_m1, time)
 
     def integrate_step(self):
         """
@@ -213,9 +228,14 @@ class Solver:
                 next_time [float]: The simulation time at the next timestep.
         """
 
-        # Calculate timestep
+        self.states[-1].t = self.temperature_from_e(np.array([self.states[-1].nb]), np.array([self.states[-1].ye]), self.states[-1].fluid_e)
+        self.states[-1].mu_p, self.states[-1].mu_n, self.states[-1].mu_e = self.get_potentials()
+        self.states[-1].mp_eff, self.states[-1].mn_eff, self.states[-1].dm_eff = self.calculate_corrector_quantities()
+        self.states[-1].rates = self.calculate_gray_rates()
+
+        # Calculate timestep, largest absorptivity corresponds to shortest timescale
         c = 29979245800.0
-        timestep = 0.01 * ((1 / max(self.states[-1].rates["kappa_a"] + self.states[-1].rates["kappa_0_a"])) / c)
+        timestep = 0.005 * ((1 / max(self.states[-1].rates["kappa_a"] + self.states[-1].rates["kappa_0_a"])) / c)
 
         #Calculate source terms for current state
         self.states[-1].edot_sources = self.calculate_e_source_terms(self.states[-1].J_m1)
@@ -239,6 +259,39 @@ class Solver:
 
         next_time = self.states[-1].time + timestep
         return next_e, next_ye, next_time
+    
+    def integrate_to_eq(self, verbose=False):
+        eq_detected = False
+        while not eq_detected:
+            next_e, next_ye, next_time = self.integrate_step()
+            
+            if verbose:
+                print(f"\nTime: {self.states[-1].time}"
+                    f"\ne: {self.states[-1].fluid_e}"
+                    f"\nYe: {self.states[-1].ye}"
+                    f"\nT: {self.states[-1].t}"
+                    f"\nnb: {self.states[-1].nb}"
+                    f"\nmu_p: {self.states[-1].mu_p}"
+                    f"\nmu_n: {self.states[-1].mu_n}"
+                    f"\nmu_e: {self.states[-1].mu_e}"
+                    f"\nmn_eff: {self.states[-1].mn_eff}"
+                    f"\nmp_eff: {self.states[-1].mp_eff}"
+                    f"\ndm_eff: {self.states[-1].dm_eff}"
+                    f"\nedot_sources: {self.states[-1].edot_sources.tolist()}"
+                    f"\nndot_sources: {self.states[-1].ndot_sources.tolist()}",
+                    f"\nn_m1: {self.states[-1].n_m1}",
+                    f"\nJ_m1: {self.states[-1].J_m1}",
+                    f"\nchi_m1: {self.states[-1].chi_m1}")
+
+
+            next_state = self.generate_new_state(self.states[-1].nb, next_ye, next_e, next_time)
+            self.states.append(next_state)
+
+            # Check to see if numerical integration has converged for both e_fluid and ye. Integration is considered to converge if the difference between the last state and the new state is less than the solver's integration tolerance.
+            if (np.abs(self.states[-1].ye - self.states[-2].ye) < self.integrate_tolerance):
+                eq_detected = True
+
+        return
 
 
 
@@ -276,32 +329,37 @@ eos.validate()
 eos.restrict_idx(it1=-1)
 eos.shrink_to_valid_nb()
 
-## Input thermodynamic quantities (corresponding to point A in Chiesa+25 PRD)
+## Input thermodynamic quantities (corresponding to point F in Chiesa+25 PRD)
 ##  N.B.: chemical potentials include the rest mass contribution
-nb   = 4.208366627847035e+38  # Baryon number density [cm-3]      
-e_nb = 4.3441769719367175e+41 # Baryon energy density [MeV cm-3]
-temp = 12.406403541564941     # Temperature [MeV]
-ye   = 0.07158458232879639    # Electron fraction
-xn   = 1. - ye                # Neutron fraction
-xp   = ye                     # Proton fraction
-mu_e = 187.1814489            # Electron chemical potential [MeV]
-mu_p = 1011.01797737          # Proton chemical potential [MeV]
-mu_n = 1221.59013681          # Neutron chemical potential [MeV]
-dU = 18.92714728              # Nucleon interaction potential difference (Un-Up) [MeV]
-mp_eff = 278.87162217         # Proton effective mass [MeV]
-mn_eff = 280.16495513         # Neutron effective mass [MeV]
-dm = mn_eff - mp_eff          # Nucleon effective mass difference [MeV]
+nb   = (1.0182011974e+10 / eos.unit_dens) * 1e39 # Baryon number density [cm-3]      
+t = 2.1441581249e+00    # Temperature [MeV]
+ye   = 1.8740089238e-01    # Electron fraction
+xn   = 7.9639333255e-01                # Neutron fraction
+xp   = 1.7166997157e-01                     # Proton fraction
+e_nb = np.exp(eos.eval_given_rtx(np.log((eos.thermo["Q7"] + 1) * nb * 1e-39 * eos.mn), np.array([nb]) * 1e-39, np.array([ye]), np.array([t])))[0] * 1e39
 
-n_m1 = [3.739749408027436e+33, 1.2174961961689319e+35, 2.2438496448164613e+34, 2.2438496448164613e+34]  # Neutrino number densities [cm-3]
-J_m1 = [1.246583136009145e+35,  5.360307484839323e+36,  8.726081952064015e+35,  8.726081952064015e+35]  # Neutrino energy densities [MeV cm-3]
-chi_m1  = [1./3., 1./3., 1./3., 1./3.]  # Eddington factor
+n_m1 = [1.2163992294e-02 * nb, 1.1021108202e-02 * nb, 4.6724985033e-04 * nb, 4.6724985033e-04 * nb]  # Neutrino number densities [cm-3]
+J_m1 = [1.0770866527e-01 * nb,  1.3601605129e-01 * nb,  9.7433536159e-03 * nb,  9.7433536159e-03 * nb]  # Neutrino energy densities [MeV cm-3]
+chi_m1  = [5.1007592678e-01, 5.2363729477e-01, 5.3103929758e-01, 5.3103929758e-01]  # Eddington factor
+
+print(f"nb: {nb} cm-3",
+      f"\nt: {t} MeV",
+      f"\nye: {ye}",
+      f"\nxn: {xn}",
+      f"\nxp: {xp}",
+      f"\ne_nb: {e_nb} MeV cm-3",
+      f"\nn_m1: {n_m1} cm-3",
+      f"\nJ_m1: {J_m1} MeV cm-3",
+      f"\nchi_m1: {chi_m1}")
 
 init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
 opacity_pars = {'use_dU': False, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
-solver = Solver(eos, init_state, None, opacity_flags, opacity_pars)
+solver = Solver(eos, init_state, 1e-8, opacity_flags, opacity_pars)
+solver.integrate_to_eq(verbose=True)
+
 
 
 
