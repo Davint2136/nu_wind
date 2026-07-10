@@ -6,6 +6,7 @@ from compose.eos import Metadata, Table
 from copy import deepcopy
 from os import system, name
 from scipy.optimize import bisect
+import pandas as pd
 
 
 class State:
@@ -83,12 +84,13 @@ class Solver:
 
         interp = self.table.interpolate_3D(np.array([state.nb]) * 1e-39, np.array([state.ye]), np.array([state.t]), method='linear')
         mu_b = (interp.thermo["Q3"][0, 0, 0] + 1) * interp.mn
-        mu_q = interp.thermo["Q4"][0, 0, 0] * interp.mn
+        mu_q = interp.thermo["Q4"][0, 0, 0] * interp.mn 
         mu_l = interp.thermo["Q5"][0, 0, 0] * interp.mn
+
 
         mu_p = mu_b + mu_q #(Baryon number: 1, Charge number: +1, Lepton number: 0)
         mu_n = mu_b #(Baryon number: 1, Charge number: 0, Lepton number: 0)
-        mu_e = mu_l - mu_q #(Baryon number: 0, Charge number: -1, Lepton number: 1)
+        mu_e = mu_l - mu_q  #(Baryon number: 0, Charge number: -1, Lepton number: 1)
 
         return mu_p, mu_n, mu_e
 
@@ -286,6 +288,7 @@ class Solver:
     
     def integrate_to_eq(self, verbose=False):
         eq_detected = False
+        num_states = 1
         while not eq_detected:
             next_state = self.integrate_step(self.states[-1])
             
@@ -305,17 +308,46 @@ class Solver:
                     f"\nndot_sources: {self.states[-1].ndot_sources.tolist()}",
                     f"\nn_m1: {self.states[-1].n_m1}",
                     f"\nJ_m1: {self.states[-1].J_m1}",
-                    f"\nchi_m1: {self.states[-1].chi_m1}")
+                    f"\nchi_m1: {self.states[-1].chi_m1}",
+                    f"\nNumber of saved states: {num_states}")
 
             self.states.append(next_state)
+            num_states += 1
 
             # Check to see if numerical integration has converged for both e_fluid and ye. Integration is considered to converge if the difference between the last state and the new state is less than the solver's integration tolerance.
             if (np.abs(self.states[-1].ye - self.states[-2].ye) < self.integrate_tolerance):
                 eq_detected = True
-
+        self.calculate_state(self.states[-1])
+        self.save_to_csv()
         return
 
+    def save_to_csv(self):
+        nb_list = []
+        e_list = []
+        ye_list = []
+        t_list = []
+        edot_sources_list = []
+        ndot_sources_list = []
+        n_m1_list = []
+        J_m1_list = []
+        time_list = []
+        
+        for state in self.states:
+            nb_list.append(state.nb)
+            e_list.append(state.fluid_e)
+            ye_list.append(state.ye)
+            t_list.append(state.t)
+            edot_sources_list.append(state.edot_sources)
+            ndot_sources_list.append(state.ndot_sources)
+            n_m1_list.append(state.n_m1)
+            J_m1_list.append(state.J_m1)
+            time_list.append(state.time)
 
+        data = pd.DataFrame({"Time" : time_list, "nb" : nb_list, "e_fluid" : e_list, "ye" : ye_list, "t" : t_list, "edot_sources" : edot_sources_list, "ndot_sources" : ndot_sources_list, "n_m1" : n_m1_list, "J_m1" : J_m1_list})
+        data.to_csv("single_zone.csv")
+        return
+
+        
 
 
 #TESTING-------------------------------------------------------------
@@ -381,7 +413,26 @@ opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_in
 opacity_pars = {'use_dU': False, 'use_dm_eff': True, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'HR98', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
 solver = Solver(eos, init_state, 1e-8, opacity_flags, opacity_pars)
-solver.integrate_to_eq(verbose=True)
+solver.calculate_state(init_state)
+"""print(f"\nTime: {init_state.time}"
+                    f"\ne: {init_state.fluid_e}"
+                    f"\nYe: {init_state.ye}"
+                    f"\nT: {init_state.t}"
+                    f"\nnb: {init_state.nb}"
+                    f"\nmu_p: {init_state.mu_p}"
+                    f"\nmu_n: {init_state.mu_n}"
+                    f"\nmu_e: {init_state.mu_e}"
+                    f"\nmn_eff: {init_state.mn_eff}"
+                    f"\nmp_eff: {init_state.mp_eff}"
+                    f"\ndm_eff: {init_state.dm_eff}"
+                    f"\nedot_sources: {init_state.edot_sources.tolist()}"
+                    f"\nndot_sources: {init_state.ndot_sources.tolist()}",
+                    f"\nn_m1: {init_state.n_m1}",
+                    f"\nJ_m1: {init_state.J_m1}",
+                    f"\nchi_m1: {init_state.chi_m1}")"""
+
+
+#solver.integrate_to_eq(verbose=True)
 
 
 
