@@ -12,7 +12,7 @@ import pandas as pd
 
 class State:
     """Class showing the state of the simulation."""
-    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, time = 0.0, dU = None):
+    def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, time = 0.0):
         self.nb = nb                                        # Baryon number density [cm-3]
         self.ye = ye                                        # Electron fraction
         self.xn = 1. - ye                                   # Neutron fraction
@@ -33,23 +33,22 @@ class State:
         self.mp_eff = None                                  # Dirac effective proton mass [MeV]
         self.mn_eff = None                                  # Dirac effective neutron mass [MeV]
         self.dm_eff = None                                  # Nucleon effective mass difference [MeV]
-        self.dU = dU
         self.time = time                                    # Time at which the state occurs during the simulation [s]
 
 
 class Solver:
     c = 29979245800.0
 
-    def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict):
+    def __init__(self, table : Table, opacity_flags : dict, opacity_pars : dict):
         self.timestep = None
         self.table = table
-        self.states = [state]
+        self.states = []
         self.opacity_flags = opacity_flags
         self.opacity_pars = opacity_pars
-        """self.k1_e = []
+        self.k1_e = []
         self.k2_e = []
         self.k1_ye = []
-        self.k2_ye = []"""
+        self.k2_ye = []
 
 
     def temperature_from_e(self, state : State):
@@ -223,7 +222,7 @@ class Solver:
         state.ndot_sources = self.calculate_n_source_terms(state)
         return
 
-    def generate_new_state(self, nb : float, ye : float, fluid_e : float, n_m1 : list, J_m1 : list, time : float, dU=None):
+    def generate_new_state(self, nb : float, ye : float, fluid_e : float, n_m1 : list, J_m1 : list, time : float):
         """
             Given a number density, electron fraction, and energy density, creates a new State object.
 
@@ -236,119 +235,39 @@ class Solver:
             Outputs:
                 [State]: A new state object containing the inputted values. n_m1, J_m1, and chi_m1 from the previous state persist into the new State object.
         """
-        return State(nb, ye, fluid_e, n_m1, J_m1, [1/3, 1/3, 1/3, 1/3], time, dU)
+        return State(nb, ye, fluid_e, n_m1, J_m1, [1/3, 1/3, 1/3, 1/3], time)
 
-    def integrate_step(self, state : State):
-        """
-            Integrates the simulation forward in time by one timestep. Finds the next fluid energy density and electron fraction using a variable step size RK2 integrator, where the timestep corresponds
-            to a small fraction of the absorptivity corresponding to the shortest timescale.
+    def RK45_deriv_function(self, t, vars):
+        nb = self.states[-1].nb
+        time = self.states[-1].time
 
-            Outputs:
-                next_e [float]: The fluid's energy density at the next timestep of the simulation.
-                next_ye [float]: The fluid's electron fraction at the next timestep of the simulation.
-                next_time [float]: The simulation time at the next timestep.
-        """
+        test_state = State(nb, vars[1], vars[0], vars[5:], vars[2:5], chi_m1, time)
+        self.calculate_state(test_state)
+        edot = -np.sum(test_state.edot_sources)
+        yedot = (test_state.ndot_sources[1] - test_state.ndot_sources[0]) / nb
 
-        # Calculate timestep, largest absorptivity corresponds to shortest timescale
-        self.calculate_state(state)
+        derivs = np.array([edot, yedot] + test_state.edot_sources + test_state.ndot_sources)
+        return derivs
 
-        timestep = 0.1 * ((1 / max(state.rates["kappa_a"] + state.rates["kappa_0_a"])) / self.c)
+    def integrate_step_RK45(self, current_state : list, solver : RK45):
         
-        # Find k1 for neutrino fields 
-        k1_J = (timestep * np.array(state.edot_sources))
-        k1_n = (timestep * np.array(state.ndot_sources))
+        state = solver.y
+        
+        
+        solver.
 
-        #Calculate k1 for the fluid energy density and electron fraction
-        k1_e = -(np.sum(state.edot_sources)) * timestep
-        k1_ye = ((state.ndot_sources[1] - state.ndot_sources[0]) / state.nb) * timestep
-
-        state.edot = k1_e
-        state.yedot = k1_ye
-
-        #Calculate state at midpoint of timestep
-        e_fluid_mid = state.fluid_e + (k1_e / 2)
-        ye_mid = state.ye +  (k1_ye / 2)
-
-        J_m1_mid = np.array(state.J_m1) + (k1_J / 2)
-        n_m1_mid = np.array(state.n_m1) + (k1_n / 2)
-
-        midpoint = self.generate_new_state(state.nb, ye_mid, e_fluid_mid, n_m1_mid, J_m1_mid, state.time + (timestep * 0.5))
-
-        self.calculate_state(midpoint)
-
-        #Find k2 for neutrino fields and matter fields
-        k2_J = (timestep * np.array(midpoint.edot_sources))
-        k2_n = (timestep * np.array(midpoint.ndot_sources))
-
-        #Calculate k2 for the fluid energy density and electron fraction
-        k2_e = -(np.sum(midpoint.edot_sources)) * timestep
-        k2_ye = ((midpoint.ndot_sources[1] - midpoint.ndot_sources[0]) / midpoint.nb) * timestep
-
-        #Update neutrino fields
-        new_J_m1 = np.array(state.J_m1) + ((k1_J + k2_J) * 0.5)
-        new_n_m1 = np.array(state.n_m1) + ((k1_n + k2_n) * 0.5)
-
-        """print(f"\nTime: {midpoint.time}")
-        print(f"k2_e / k1_e: {k2_e / k1_e}")
-        print(f"k2_ye / k1_y1: {k2_ye / k1_ye}")
-        self.k2_e.append(k2_e)
-        self.k1_e.append(k1_e)
-        self.k2_ye.append(k2_ye)
-        self.k1_ye.append(k1_ye)"""
-        #Update fluid energy density and electron fraction
-        new_fluid_e = state.fluid_e + ((k1_e + k2_e) * 0.5)
-        new_ye = state.ye + ((k1_ye + k2_ye) * 0.5)
-
-        #Generate next state
-        next_state = self.generate_new_state(state.nb, new_ye, new_fluid_e, new_n_m1, new_J_m1, state.time + timestep, state.dU)
-
-        return next_state
-    
-    
-    def integrate_to_eq(self, verbose=False):
-        init_state = deepcopy(self.states[-1])
-        self.calculate_state(init_state)
-        t_stop = ((1 / min(init_state.rates["kappa_a"] + init_state.rates["kappa_0_a"])) / self.c) * 200
-        init_e_tot = init_state.fluid_e + sum(init_state.J_m1)
-        init_lnum = init_state.ye + ((init_state.n_m1[0] - init_state.n_m1[1]) / init_state.nb)
-
-        eq_detected = False
-        while not eq_detected:
-
-            next_state = self.integrate_step(self.states[-1])
-            current_e_tot = self.states[-1].fluid_e + sum(self.states[-1].J_m1)
-            current_lnum = self.states[-1].ye + (((self.states[-1].n_m1[0] - self.states[-1].n_m1[1]) + (self.states[-1].n_m1[2] - self.states[-1].n_m1[3])) / self.states[-1].nb)
-            current_nue_pot = self.states[-1].mu_p - self.states[-1].mu_n + self.states[-1].mu_e
-
-            #rates = self.states[-1].rates
-            #em_frac = max(abs(rates["eta"][i] - (self.c * rates["kappa_a"][i] * self.states[-1].J_m1[i])) / max(rates["eta"][i], self.c * rates["kappa_a"][i] * self.states[-1].J_m1[i]) for i in range(4))
-            if verbose:
-                print(f"\nTime: {self.states[-1].time}/{t_stop}"
-                    f"\ne: {self.states[-1].fluid_e}"
-                    f"\nYe: {self.states[-1].ye}"
-                    f"\nT: {self.states[-1].t}"
-                    f"\nnb: {self.states[-1].nb}"
-                    f"\nmn_eff: {self.states[-1].mn_eff}"
-                    f"\nmp_eff: {self.states[-1].mp_eff}"
-                    f"\ndm_eff: {self.states[-1].dm_eff}"
-                    f"\nedot_sources: {self.states[-1].edot_sources.tolist()}"
-                    f"\nndot_sources: {self.states[-1].ndot_sources.tolist()}",
-                    f"\nn_m1: {self.states[-1].n_m1}",
-                    f"\nJ_m1: {self.states[-1].J_m1}",
-                    f"\nedot: {self.states[-1].edot}"
-                    f"\nyedot: {self.states[-1].yedot}",
-                    f"\nEnergy conservation: {current_e_tot / init_e_tot}",
-                    f"\nLepton fraction conservation: {current_lnum / init_lnum}")
-
-            self.states.append(next_state)
-
-            if self.states[-1].time > t_stop:
-                eq_detected = True
-
-        self.calculate_state(self.states[-1])
-        self.save_to_csv()
         return
 
+    def integrate_to_eq_RK45(self, state : State):
+        self.calculate_state(state)
+        self.states.append(state)
+        
+        t_stop = ((1 / min(init_state.rates["kappa_a"] + init_state.rates["kappa_0_a"])) / self.c) * 150
+        init_state = np.array([state.fluid_e, state.ye] + state.J_m1 + state.n_m1)
+        init_atol = 1e-10 * init_state
+        init_rtol = 1e-9
+        rk45 = RK45(self.RK45_deriv_function, state.time, init_state, t_stop, rtol=init_rtol, atol=init_atol, first_step=1e-12)
+        return
 
     def save_to_csv(self):
         nb_list = []
@@ -413,28 +332,26 @@ eos.validate()
 eos.restrict_idx(it1=-1)
 eos.shrink_to_valid_nb()
 
-## Input thermodynamic quantities
+## Input thermodynamic quantities (corresponding to point F in Chiesa+25 PRD)
 ##  N.B.: chemical potentials include the rest mass contribution
 
-nb = (9.81e13 / (eos.unit_dens * eos.mn)) * 1e39 # Baryon number density [cm-3]   
-t = 16.63   # Temperature [MeV]
-ye   =  0.06
+nb = (1.037269e10 / (eos.unit_dens * eos.mn)) * 1e39 # Baryon number density [cm-3]   
+t = 2.1441581249    # Temperature [MeV]
+ye   = 0.18740089238
 
 e_nb = np.exp(eos.eval_given_rtx(np.log((eos.thermo["Q7"] + 1) * nb * 1e-39 * eos.mn), np.array([nb]) * 1e-39, np.array([ye]), np.array([t]), method="linear"))[0] * 1e39
 
-n_m1 = [0.36e-3 * nb, 2.21e-3 * nb, 0.92e-3 * nb, 0.92e-3 * nb]  # Neutrino number densities [cm-3]
-J_m1 = [0.18e-1 * nb, 1.23e-1 * nb, 0.48e-1 * nb, 0.48e-1 * nb]  # Neutrino energy densities [MeV cm-3]
+n_m1 = [0.012163992294 * nb, 0.011021108202 * nb, 0.00046724985 * nb, 0.00046724985 * nb]  # Neutrino number densities [cm-3]
+J_m1 = [(1.068702e27 / eos.unit_energy) * 1e39, (1.349572e27 / eos.unit_energy) * 1e39, (3.867002e26 / eos.unit_energy) * 1e39, (3.867002e26 / eos.unit_energy) * 1e39]  # Neutrino energy densities [MeV cm-3]
 chi_m1  = [1/3, 1/3, 1/3, 1/3]  # Eddington factor
-dU = 3.48e1
 
 
-init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU=dU)
+init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
-opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': False, 'use_WM_sc': False, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
+opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': True, 'use_WM_sc': True, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
 solver = Solver(eos, init_state, opacity_flags, opacity_pars)
-
 try:   
     solver.integrate_to_eq(verbose=True)
 except KeyboardInterrupt:
