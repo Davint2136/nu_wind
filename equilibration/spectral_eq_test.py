@@ -8,7 +8,7 @@ from os import system, name
 from scipy.optimize import bisect
 import pandas as pd
 
-
+#TODO: Change rates to reflect different energy bins needed for computing spectral rates
 class State:
     """Class showing the state of the simulation."""
     def __init__(self, nb, ye, fluid_e, n_m1, J_m1, chi_m1, time = 0.0, dU = None):
@@ -119,7 +119,10 @@ class Solver:
         dm_eff = mn_eff - mp_eff
         return mp_eff, mn_eff, dm_eff
 
-    def calculate_gray_rates(self, state : State):
+
+
+    #TODO: do this using spectral rates. Make bins for different neutrino energies, find the rates for each, then add them up.
+    def calculate_spectral_rates(self, state : State):
         """
             Calculates neutrino interaction rates based on the fluid's conditions in the current state.
 
@@ -147,7 +150,7 @@ class Solver:
         #Load reactions and corrections
         opacity_flags = self.opacity_flags
         opacity_pars = self.opacity_pars
-
+        
         #Load M1 quantities
         m1_pars = bns.M1Quantities()
         m1_pars.chi = state.chi_m1
@@ -155,6 +158,20 @@ class Solver:
         m1_pars.J = [x * 1e-21 for x in state.J_m1]
 
         distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
+
+        #Initialize energy distribution - from 0 to 100 MeV in 5 MeV steps. Center of bin used for computation.
+        nu_E_bins = np.linspace(2.5, 100, 5).tolist()
+        
+        #Calculate n_nu(E) by finding distribution
+        ids = {0 : "nue", 1 : "anue", 2 : "nux", 3: "anux"}
+        distribution = {"nue" : [], "anue" : [], "nux" : [], "anux" : []}
+
+        for species_id in ids.keys():
+            for E in nu_E_bins:
+                f_point = bns.TotalNuF(E, distr_pars, species_id)
+                distribution[ids[species_id]].append(f_point)
+
+            distribution[ids[species_id]] = np.array(distribution[ids[species_id]])
 
         #Populate global structure using grey_pars
         grey_pars = bns.GreyOpacityParams()
@@ -164,52 +181,9 @@ class Solver:
         grey_pars.distr_pars = distr_pars
         grey_pars.m1_pars = m1_pars
 
-        #Calculate rates
-        gray_rates = bns.ComputeM1Opacities(quad, quad, grey_pars)
-        gray_rates['eta']       = [x * 1e21 for x in gray_rates['eta']]
-        gray_rates['eta_0']     = [x * 1e21 for x in gray_rates['eta_0']]
-        gray_rates['kappa_a']   = [x * 1e7  for x in gray_rates['kappa_a']]
-        gray_rates['kappa_0_a'] = [x * 1e7  for x in gray_rates['kappa_0_a']]
-        gray_rates['kappa_s']   = [x * 1e7  for x in gray_rates['kappa_s']]
-        return gray_rates
+        return 
 
-    def calculate_e_source_terms(self, state : State):
-        """
-            Calculates the neutrino energy density source terms needed for numerical integration based on the conditions in the current simulation state.
-
-            Inputs:
-                J_m1 [list]: list of neutrino energy densities sorted by species in the format [nue, anue, nux, anux]
-            
-            Outputs:
-                [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
-        """
-
-        rates = state.rates
-        e_terms = [None, None, None, None]
-
-        for i in range(0, 4):
-            e_terms[i] = rates["eta"][i] - (self.c * rates["kappa_a"][i] * state.J_m1[i])
-
-        return np.array(e_terms)
-    
-    def calculate_n_source_terms(self, state : State):
-        """
-            Calculates the neutrino number density source terms needed for numerical integration based on the conditions in the current simulation state.
-
-            Inputs:
-                n_m1 [list]: list of neutrino number densities sorted by species in the format [nue, anue, nux, anux]
-            
-            Outputs:
-                [numpy.ndarray]: A numpy array containing the energy density source terms in the format [nue, anue, nux, anux]
-        """
-        rates = state.rates
-        n_terms = [None, None, None, None]
-        
-        for i in range(0, 4):
-            n_terms[i] = rates["eta_0"][i] - (self.c * rates["kappa_0_a"][i] * state.n_m1[i])
-
-        return np.array(n_terms)
-    
+    #TODO: Make this work with spectral rates. source term calculations will change.
     def calculate_state(self, state : State):
         """
             Calculates state variables left blank at the time of state creation. Updates the inputted state in-place.
