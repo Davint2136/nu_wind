@@ -17,14 +17,15 @@ class State:
         self.xn = 1. - ye                                   # Neutron fraction
         self.xp = ye                                        # Proton fraction
         self.fluid_e  = fluid_e                             # Fluid energy density [MeV cm-3]
-        self.n_m1 = n_m1                                    # Gray neutrino number densities. Order: nue, anue, nux, anux [cm-3]
-        self.J_m1 = J_m1                                    # Gray neutrino energy densities. Order: nue, anue, nux, anux [MeV cm-3]
+        self.n_m1 = n_m1
+        self.J_m1 = J_m1
+        self.nu_n_dist = None
+        self.nu_J_dist = None                                  
         self.chi_m1 = chi_m1                                # Eddington factor
         self.t = None                                       # Fluid temperature [MeV]
         self.mu_e = None                                    # Electron chemical potential [MeV]
         self.mu_p = None                                    # Proton chemical potential [MeV]
         self.mu_n = None                                    # Neutron Chemical Potential [MeV]
-        self.edot_sources = None                                 # Neutrino energy density source terms for integration [MeV cm-3 s-1]
         self.ndot_sources = None                                 # Neutrino number density source terms for integration [cm-3 s-1]
         self.rates = None                                   # Neutrino reaction rates 
         self.mp_eff = None                                  # Dirac effective proton mass [MeV]
@@ -37,13 +38,17 @@ class State:
 class Solver:
     c = 29979245800.0
 
-    def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, binwidth : float):
+    def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, binwidth : float, nu_external_E : dict):
         self.timestep = None
         self.table = table
         self.states = [state]
         self.opacity_flags = opacity_flags
         self.opacity_pars = opacity_pars
-        self.E_range = np.arange(2.5, 100, binwidth)
+        self.E_binwidth = binwidth
+        #This is a linear energy range, and will result in linear distributions. I need to construct them logarithmically. The distribution yields higher occupation numbers for lower energies, so linear isn't a good fit here.
+        #I'll leave this for now.
+        self.E_range = np.arange(0.1, 20, self.E_binwidth)
+        self.nu_external_E = nu_external_E
         """self.k1_e = []
         self.k2_e = []
         self.k1_ye = []
@@ -118,10 +123,39 @@ class Solver:
         dm_eff = mn_eff - mp_eff
         return mp_eff, mn_eff, dm_eff
 
-    def calculate_distribution(self, state: State):
-        #Initialize eos_pars and populate
+    #TODO: NEEDS TESTING
+    def calculate_dist(self, state : State):
+        state.t = self.temperature_from_e(state)
+        state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
+        state.mp_eff, mn_eff, dm_eff = self.calculate_corrector_quantities(state)
+
+        #Calculate nue and anue chemical potentials
+        mu_nue = state.mu_p - state.mu_n + state.mu_e
+        mu_anue = - mu_nue
+
+        #calculate energy and number density distributions using fermi-dirac
+        nue_n_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
+        anue_n_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+
+        nue_J_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 3 / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
+        anue_J_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+
+        nu_n_dist = []
+        nu_J_dist = []
+        for i in range(0, len(self.E_range)):
+            nu_n_dist.append([nue_n_dist[i], anue_n_dist[i], 0, 0])
+            nu_J_dist.append([nue_J_dist[i], anue_J_dist[i], 0, 0])
+
+        return nu_n_dist, nu_J_dist
+
+    #TODO: NEEDS TESTING
+    def calculate_spectral_rates(self, state : State):
+        #Calculate number and energy density distributions
+        state.nu_n_dist, state.nu_J_dist = self.calculate_dist(state)
+
+        #Initialize bns_nurates eos_pars and populate
         eos_pars = bns.MyEOSParams()
-        eos_pars.nb = state.nb * 1e-21 # Convert baryon number density to nm^-3
+        eos_pars.nb = state.nb
         eos_pars.temp = state.t
         eos_pars.ye = state.ye
         eos_pars.yn = 1 - eos_pars.ye
@@ -131,7 +165,7 @@ class Solver:
         eos_pars.mu_p = state.mu_p
         eos_pars.dm_eff = state.dm_eff
 
-        #Create a quadrature, populate it with data for a Gauss-Legendre quadrature
+        #Set up Gauss-Legendre quadrature
         quad = bns.cvar.quadrature_default
         quad.nx = 6
         bns.GaussLegendre(quad)
@@ -139,53 +173,43 @@ class Solver:
         #Load reactions and corrections
         opacity_flags = self.opacity_flags
         opacity_pars = self.opacity_pars
-        
-        #Load M1 quantities
+
+        #Load non-distribution m1 quantities
         m1_pars = bns.M1Quantities()
         m1_pars.chi = state.chi_m1
-        m1_pars.n = [x * 1e-21 for x in state.n_m1]
-        m1_pars.J = [x * 1e-21 for x in state.J_m1]
 
-        distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
+        #Load grey pars
+        grey_pars = bns.GreyOpacityParams()
+        grey_pars.eos_pars = eos_pars
+        grey_pars.opacity_flags = opacity_flags
 
-        #Initialize energy distribution - from 0 to 100 MeV in 5 MeV steps. Center of bin used for computation.
-        bin_width = 5 #MeV
-        nu_E_bins = np.arange(2.5, 100, bin_width)
-        
-        #Find per-species neutrino distribution
-        ids = {0 : "nue", 1 : "anue", 2 : "nux", 3: "anux"}
-        nu_dist = {}
+        rates = []
 
-        for idx in range(0, 4):
-            species_dist = []
-            for E in nu_E_bins:
-                f_point = bns.TotalNuF(E, distr_pars, idx)
-                species_dist.append(f_point)
-            nu_dist[ids[idx]] = np.array(species_dist)
+        for i in range(0, len(self.E_range)):
+            m1_pars.n = [x * 1e-21 for x in state.nu_n_dist[i]]
+            m1_pars.J = [x * 1e-21 for x in state.nu_J_dist[i]]
 
-        #Find nu_n(E) to get neutrino number densities at the mid-bin points
-        nu_n_dist = {"nue" : nu_dist["nue"] * state.n_m1, "anue" : nu_dist["anue"] * state.n_m1, "nux" : state.n_m1, "anux" : state.n_m1}
-        return nu_n_dist
-        
+            distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
+            grey_pars.distr_pars = distr_pars
+            grey_pars.m1_pars = m1_pars
 
-    
+            spectral_rates = bns.ComputeSpectralOpacitiesStimulatedAbs(self.E_range[i], quad, grey_pars)
+            spectral_rates['kappa'] = [x * 1e7 for x in spectral_rates['kappa']]
+            spectral_rates['kappa_s'] = [x * 1e7 for x in spectral_rates['kappa_s']]
+            rates.append(spectral_rates)
 
-    #TODO: do this using spectral rates. Make bins for different neutrino energies, find the rates for each.
-    def calculate_spectral_rates(self, state : State):
-        """
-            Calculates neutrino interaction rates based on the fluid's conditions in the current state.
+        return rates
 
-            Outputs:
-                gray_rates [dict]: A dictionary consisting of energy and number emissivities, energy and number absorptivities, and scattering absorptivities.
-        """
-
-        return 
-
-
+    #TODO: Finish this. Calculate source terms using equation for de/dt in your notes. only evolve neutrino number distribution, energy distribution can always be reconstructed
+    #Note that the incoming neutrino luminosities will be provided for you, i.e. in dn_nu/dt = -lambda^-1 * (B_n - E_n), E_n or some quantity you can derive using it will be provided.
+    #For the matter fields, it's basically the same as the energy-integrated rates simulation.
+    def calculate_source_terms(self, state : State):
+        return
 
 #TESTING-------------------------------------------------------------
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(SCRIPTDIR, os.pardir))
+
 
 md = Metadata(
     pairs = {
@@ -226,13 +250,12 @@ ye   =  0.06
 
 e_nb = np.exp(eos.eval_given_rtx(np.log((eos.thermo["Q7"] + 1) * nb * 1e-39 * eos.mn), np.array([nb]) * 1e-39, np.array([ye]), np.array([t]), method="linear"))[0] * 1e39
 
-n_m1 = [0.36e-3 * nb, 2.21e-3 * nb, 0.92e-3 * nb, 0.92e-3 * nb]  # Neutrino number densities [cm-3]
-J_m1 = [0.18e-1 * nb, 1.23e-1 * nb, 0.48e-1 * nb, 0.48e-1 * nb]  # Neutrino energy densities [MeV cm-3]
+n_m1 = [0.36e-3 * nb, 2.21e-3 * nb, 0, 0]  # Neutrino number densities [cm-3]
+J_m1 = [0.18e-1 * nb, 1.23e-1 * nb, 0, 0]  # Neutrino energy densities [MeV cm-3]
 chi_m1  = [1/3, 1/3, 1/3, 1/3]  # Eddington factor
 dU = 3.48e1
 
-
-init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU=dU)
+init_state = State(nb, ye, e_nb, n_m1, chi_m1, dU=dU)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
 opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': False, 'use_WM_sc': False, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
