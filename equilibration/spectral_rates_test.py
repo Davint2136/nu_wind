@@ -39,7 +39,6 @@ class Solver:
     c = 29979245800.0
 
     def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, binwidth : float, nu_external_E : dict):
-        self.timestep = None
         self.table = table
         self.states = [state]
         self.opacity_flags = opacity_flags
@@ -47,7 +46,7 @@ class Solver:
         self.E_binwidth = binwidth
         #This is a linear energy range, and will result in linear distributions. I need to construct them logarithmically. The distribution yields higher occupation numbers for lower energies, so linear isn't a good fit here.
         #I'll leave this for now.
-        self.E_range = np.arange(0.1, 20, self.E_binwidth)
+        self.E_range = np.arange(0.1, 100, self.E_binwidth)
         self.nu_external_E = nu_external_E
         """self.k1_e = []
         self.k2_e = []
@@ -134,17 +133,14 @@ class Solver:
         mu_anue = - mu_nue
 
         #calculate energy and number density distributions using fermi-dirac
-        nue_n_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
-        anue_n_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+        nue_n_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 2) / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
+        anue_n_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 2) / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
 
-        nue_J_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 3 / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
-        anue_J_dist = ((1 / 2 * np.pi ** 2) * (self.E_range ** 2 / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+        nue_J_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 3) / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
+        anue_J_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 3) / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
 
-        nu_n_dist = []
-        nu_J_dist = []
-        for i in range(0, len(self.E_range)):
-            nu_n_dist.append([nue_n_dist[i], anue_n_dist[i], 0, 0])
-            nu_J_dist.append([nue_J_dist[i], anue_J_dist[i], 0, 0])
+        nu_n_dist = [nue_n_dist.tolist(), anue_n_dist.tolist()]
+        nu_J_dist = [nue_J_dist.tolist(), anue_J_dist.tolist()]
 
         return nu_n_dist, nu_J_dist
 
@@ -200,13 +196,29 @@ class Solver:
 
         return rates
 
-    #TODO: Finish this. Calculate source terms using equation for de/dt in your notes. only evolve neutrino number distribution, energy distribution can always be reconstructed
-    #Note that the incoming neutrino luminosities will be provided for you, i.e. in dn_nu/dt = -lambda^-1 * (B_n - E_n), E_n or some quantity you can derive using it will be provided.
-    #For the matter fields, it's basically the same as the energy-integrated rates simulation.
-    def calculate_source_terms(self, state : State):
-        return
 
 #TESTING-------------------------------------------------------------
+    def bnsnurates_dist(self, state : State):
+        state.t = self.temperature_from_e(state)
+        state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
+        state.mp_eff, mn_eff, dm_eff = self.calculate_corrector_quantities(state)
+    
+        #Calculate nue and anue chemical potentials
+        mu_nue = state.mu_p - state.mu_n + state.mu_e
+        mu_anue = - mu_nue
+
+        #Calculate distributions: bns.FermiDistr() only gives the fermi distribution, so appropriate scaling terms must be included to calculate the desired distributions.
+        nu_n_dist = [[(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_nue) * (energy ** 2) * self.E_binwidth for energy in self.E_range], 
+                     [(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_anue) * (energy ** 2) * self.E_binwidth for energy in self.E_range]]
+        
+        nu_J_dist = [[(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_nue) * (energy ** 3) * self.E_binwidth for energy in self.E_range],
+                     [(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_anue) * (energy ** 3) * self.E_binwidth for energy in self.E_range]]
+
+        return nu_n_dist, nu_J_dist
+        
+
+
+
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(SCRIPTDIR, os.pardir))
 
@@ -255,14 +267,12 @@ J_m1 = [0.18e-1 * nb, 1.23e-1 * nb, 0, 0]  # Neutrino energy densities [MeV cm-3
 chi_m1  = [1/3, 1/3, 1/3, 1/3]  # Eddington factor
 dU = 3.48e1
 
-init_state = State(nb, ye, e_nb, n_m1, chi_m1, dU=dU)
+init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU=dU)
 
 opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
 opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': False, 'use_WM_sc': False, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
-solver = Solver(eos, init_state, opacity_flags, opacity_pars, 5.0)
+solver = Solver(eos, init_state, opacity_flags, opacity_pars, 1, None)
 
-solver.states[0].t = solver.temperature_from_e(init_state)
-solver.states[0].mu_p, solver.states[0].mu_n, solver.states[0].mu_e = solver.get_potentials(init_state)
-solver.states[0].mp_eff, solver.states[0].mn_eff, solver.states[0].dm_eff = solver.calculate_corrector_quantities(init_state)
-solver.calculate_spectral_rates(init_state)
+
+

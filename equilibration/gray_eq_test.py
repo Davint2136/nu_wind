@@ -45,10 +45,6 @@ class Solver:
         self.states = [state]
         self.opacity_flags = opacity_flags
         self.opacity_pars = opacity_pars
-        """self.k1_e = []
-        self.k2_e = []
-        self.k1_ye = []
-        self.k2_ye = []"""
 
 
     def temperature_from_e(self, state : State):
