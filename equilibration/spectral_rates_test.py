@@ -7,6 +7,7 @@ from copy import deepcopy
 from os import system, name
 from scipy.optimize import bisect
 import pandas as pd
+import matplotlib.pyplot as plt
 
 #TODO: Need to figure out how to start the simulation with a given n_m1, J_m1 and then create a state object with the distributions, using that as the initial state.
 class State:
@@ -37,21 +38,16 @@ class State:
 
 class Solver:
     c = 29979245800.0
+    HBARC = 1.97327e-11 #MeV * cm
 
-    def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, binwidth : float, nu_external_E : dict):
+    def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, num_bins : float, nu_external_E : dict):
         self.table = table
         self.states = [state]
         self.opacity_flags = opacity_flags
         self.opacity_pars = opacity_pars
-        self.E_binwidth = binwidth
-        #This is a linear energy range, and will result in linear distributions. I need to construct them logarithmically. The distribution yields higher occupation numbers for lower energies, so linear isn't a good fit here.
-        #I'll leave this for now.
-        self.E_range = np.arange(0.1, 100, self.E_binwidth)
+        self.num_bins = num_bins
         self.nu_external_E = nu_external_E
-        """self.k1_e = []
-        self.k2_e = []
-        self.k1_ye = []
-        self.k2_ye = []"""
+        self.E_dist = None
 
 
     def temperature_from_e(self, state : State):
@@ -122,36 +118,46 @@ class Solver:
         dm_eff = mn_eff - mp_eff
         return mp_eff, mn_eff, dm_eff
 
+    def fermi_dirac_n(self, energy, mu, t):
+        return ((1 / (np.exp((energy - mu) / t) + 1))) * ((energy ** 2) / (2 * np.pi ** 2 )) * (1 / (self.HBARC ** 3)) #needs to be divided by HBARC^3 to be in units of cm^-3
+
     #TODO: NEEDS TESTING
     def calculate_dist(self, state : State):
         state.t = self.temperature_from_e(state)
         state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
-        state.mp_eff, mn_eff, dm_eff = self.calculate_corrector_quantities(state)
+        state.mp_eff, state.mn_eff, state.dm_eff = self.calculate_corrector_quantities(state)
 
         #Calculate nue and anue chemical potentials
         mu_nue = state.mu_p - state.mu_n + state.mu_e
         mu_anue = - mu_nue
 
+        #construct energy distribution with logarithmic spacing
+        E_dist_edges = np.exp(np.linspace(np.log(10 ** -3), np.log(100), self.num_bins + 1))
+        E_binwidths = np.diff(E_dist_edges)
+        self.E_dist = E_dist_edges[:-1] + (0.5 * E_binwidths)
+
         #calculate energy and number density distributions using fermi-dirac
-        nue_n_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 2) / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
-        anue_n_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 2) / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+        nue_n_dist = self.fermi_dirac_n(self.E_dist, mu_nue, state.t) * E_binwidths
+        anue_n_dist = self.fermi_dirac_n(self.E_dist, mu_anue, state.t) * E_binwidths
 
-        nue_J_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 3) / (np.exp((self.E_range - mu_nue) / state.t) + 1))) * self.E_binwidth
-        anue_J_dist = ((1 / (2 * np.pi ** 2)) * ((self.E_range ** 3) / (np.exp((self.E_range - mu_anue) / state.t) + 1))) * self.E_binwidth
+        nue_J_dist = nue_n_dist * self.E_dist
+        anue_J_dist = anue_n_dist * self.E_dist
 
-        nu_n_dist = [nue_n_dist.tolist(), anue_n_dist.tolist()]
-        nu_J_dist = [nue_J_dist.tolist(), anue_J_dist.tolist()]
 
-        return nu_n_dist, nu_J_dist
+        return [nue_n_dist.tolist(), anue_n_dist.tolist()], [nue_J_dist.tolist(), anue_J_dist.tolist()]
 
     #TODO: NEEDS TESTING
     def calculate_spectral_rates(self, state : State):
         #Calculate number and energy density distributions
         state.nu_n_dist, state.nu_J_dist = self.calculate_dist(state)
 
+        #Calculate total number and energy densities by species for bns_nurates
+        state.n_m1 = [np.sum(state.nu_n_dist[0]), np.sum(state.nu_n_dist[1]), 0, 0] #nue, anue, nux, anux
+        state.J_m1 = [np.sum(state.nu_J_dist[0]), np.sum(state.nu_J_dist[1]), 0, 0] #nue, anue, nux, anux
+
         #Initialize bns_nurates eos_pars and populate
         eos_pars = bns.MyEOSParams()
-        eos_pars.nb = state.nb
+        eos_pars.nb = state.nb * 1e-21
         eos_pars.temp = state.t
         eos_pars.ye = state.ye
         eos_pars.yn = 1 - eos_pars.ye
@@ -181,44 +187,81 @@ class Solver:
 
         rates = []
 
-        for i in range(0, len(self.E_range)):
-            m1_pars.n = [x * 1e-21 for x in state.nu_n_dist[i]]
-            m1_pars.J = [x * 1e-21 for x in state.nu_J_dist[i]]
+        #Calculate rates; one set of rates for each energy in E_dist
+        for i in range(0, len(self.E_dist)):
+            m1_pars.n = [x * 1e-21 for x in state.n_m1]
+            m1_pars.J = [x * 1e-21 for x in state.J_m1]
 
             distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
             grey_pars.distr_pars = distr_pars
             grey_pars.m1_pars = m1_pars
 
-            spectral_rates = bns.ComputeSpectralOpacitiesStimulatedAbs(self.E_range[i], quad, grey_pars)
+            spectral_rates = bns.ComputeSpectralOpacitiesStimulatedAbs(self.E_dist[i], quad, grey_pars)
             spectral_rates['kappa'] = [x * 1e7 for x in spectral_rates['kappa']]
             spectral_rates['kappa_s'] = [x * 1e7 for x in spectral_rates['kappa_s']]
             rates.append(spectral_rates)
 
         return rates
 
+    def calculate_gray_rates(self, state : State):
+            """
+                Calculates neutrino interaction rates based on the fluid's conditions in the current state.
+
+                Outputs:
+                    gray_rates [dict]: A dictionary consisting of energy and number emissivities, energy and number absorptivities, and scattering absorptivities.
+            """
+
+            state.t = self.temperature_from_e(state)
+            state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
+            state.mp_eff, state.mn_eff, state.dm_eff = self.calculate_corrector_quantities(state)
+
+            #Initialize eos_pars and populate
+            eos_pars = bns.MyEOSParams()
+            eos_pars.nb = state.nb * 1e-21 # Convert baryon number density to nm^-3
+            eos_pars.temp = state.t
+            eos_pars.ye = state.ye
+            eos_pars.yn = 1 - eos_pars.ye
+            eos_pars.yp = eos_pars.ye
+            eos_pars.mu_n = state.mu_n
+            eos_pars.mu_e = state.mu_e
+            eos_pars.mu_p = state.mu_p
+            eos_pars.dm_eff = state.dm_eff
+
+            #Create a quadrature, populate it with data for a Gauss-Legendre quadrature
+            quad = bns.cvar.quadrature_default
+            quad.nx = 6
+            bns.GaussLegendre(quad)
+
+            #Load reactions and corrections
+            opacity_flags = self.opacity_flags
+            opacity_pars = self.opacity_pars
+
+            #Load M1 quantities
+            m1_pars = bns.M1Quantities()
+            m1_pars.chi = state.chi_m1
+            m1_pars.n = [x * 1e-21 for x in state.n_m1]
+            m1_pars.J = [x * 1e-21 for x in state.J_m1]
+
+            distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
+
+            #Populate global structure using grey_pars
+            grey_pars = bns.GreyOpacityParams()
+            grey_pars.eos_pars = eos_pars
+            grey_pars.opacity_flags = opacity_flags
+            grey_pars.opacity_pars = opacity_pars
+            grey_pars.distr_pars = distr_pars
+            grey_pars.m1_pars = m1_pars
+
+            #Calculate rates
+            gray_rates = bns.ComputeM1Opacities(quad, quad, grey_pars)
+            gray_rates['eta']       = [x * 1e21 for x in gray_rates['eta']]
+            gray_rates['eta_0']     = [x * 1e21 for x in gray_rates['eta_0']]
+            gray_rates['kappa_a']   = [x * 1e7  for x in gray_rates['kappa_a']]
+            gray_rates['kappa_0_a'] = [x * 1e7  for x in gray_rates['kappa_0_a']]
+            gray_rates['kappa_s']   = [x * 1e7  for x in gray_rates['kappa_s']]
+            return gray_rates
 
 #TESTING-------------------------------------------------------------
-    def bnsnurates_dist(self, state : State):
-        state.t = self.temperature_from_e(state)
-        state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
-        state.mp_eff, mn_eff, dm_eff = self.calculate_corrector_quantities(state)
-    
-        #Calculate nue and anue chemical potentials
-        mu_nue = state.mu_p - state.mu_n + state.mu_e
-        mu_anue = - mu_nue
-
-        #Calculate distributions: bns.FermiDistr() only gives the fermi distribution, so appropriate scaling terms must be included to calculate the desired distributions.
-        nu_n_dist = [[(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_nue) * (energy ** 2) * self.E_binwidth for energy in self.E_range], 
-                     [(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_anue) * (energy ** 2) * self.E_binwidth for energy in self.E_range]]
-        
-        nu_J_dist = [[(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_nue) * (energy ** 3) * self.E_binwidth for energy in self.E_range],
-                     [(1 / (2 * np.pi ** 2)) * bns.FermiDistr(energy, state.t, mu_anue) * (energy ** 3) * self.E_binwidth for energy in self.E_range]]
-
-        return nu_n_dist, nu_J_dist
-        
-
-
-
 SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(SCRIPTDIR, os.pardir))
 
@@ -256,23 +299,40 @@ eos.shrink_to_valid_nb()
 ## Input thermodynamic quantities
 ##  N.B.: chemical potentials include the rest mass contribution
 
-nb = (9.81e13 / (eos.unit_dens * eos.mn)) * 1e39 # Baryon number density [cm-3]   
-t = 16.63   # Temperature [MeV]
-ye   =  0.06
+nb = (1.01e10 / (eos.unit_dens * eos.mn)) * 1e39 # Baryon number density [cm-3]   
+t = 2.17   # Temperature [MeV]
+ye   =  0.19
 
 e_nb = np.exp(eos.eval_given_rtx(np.log((eos.thermo["Q7"] + 1) * nb * 1e-39 * eos.mn), np.array([nb]) * 1e-39, np.array([ye]), np.array([t]), method="linear"))[0] * 1e39
 
-n_m1 = [0.36e-3 * nb, 2.21e-3 * nb, 0, 0]  # Neutrino number densities [cm-3]
-J_m1 = [0.18e-1 * nb, 1.23e-1 * nb, 0, 0]  # Neutrino energy densities [MeV cm-3]
+n_m1 = [12.56e-3 * nb, 13e-3 * nb, 0, 0]  # Neutrino number densities [cm-3]
+J_m1 = [11.89e-2 * nb, 15.56e-2 * nb, 0, 0]  # Neutrino energy densities [MeV cm-3]
 chi_m1  = [1/3, 1/3, 1/3, 1/3]  # Eddington factor
 dU = 3.48e1
 
 init_state = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU=dU)
+init_state_copy = State(nb, ye, e_nb, n_m1, J_m1, chi_m1, dU=dU)
 
-opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': True, 'use_inelastic_scatt': True, 'use_iso': True}
+opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': False, 'use_inelastic_scatt': True, 'use_iso': True}
 opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': False, 'use_WM_sc': False, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
-solver = Solver(eos, init_state, opacity_flags, opacity_pars, 1, None)
+
+solver = Solver(eos, init_state, opacity_flags, opacity_pars, 1000, None)
+rates = solver.calculate_spectral_rates(init_state)
+
+#calculate the average gray number imfp for each species
+nue_kappa = np.array([rate["kappa"][0] for rate in rates])
+anue_kappa = np.array([rate["kappa"][1] for rate in rates])
+
+nue_kappa_0 = np.sum(nue_kappa * np.array(init_state.nu_n_dist[0])) / np.sum(np.array(init_state.nu_n_dist[0]))
+anue_kappa_0 = np.sum(anue_kappa * np.array(init_state.nu_n_dist[1])) / np.sum(np.array(init_state.nu_n_dist[1]))
+
+gray_rates = solver.calculate_gray_rates(init_state_copy)
+print("--------------------------------------")
+print(f"nue number imfp ratio [gray calculated from spectral vs / bns_nurates gray]: {nue_kappa_0 / (gray_rates["kappa_0_a"][0])}")
+print(f"anue number imfp ratio [gray calculated from spectral / bns_nurates gray]: {anue_kappa_0 / (gray_rates["kappa_0_a"][1])}")
+print("--------------------------------------")
+
 
 
 
