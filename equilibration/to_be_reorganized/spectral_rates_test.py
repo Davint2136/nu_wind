@@ -132,7 +132,7 @@ class Solver:
         mu_anue = - mu_nue
 
         #construct energy distribution with logarithmic spacing
-        E_dist_edges = np.exp(np.linspace(np.log(10 ** -3), np.log(100), self.num_bins + 1))
+        E_dist_edges = np.exp(np.linspace(np.log(10 ** -2), np.log(10 ** 4), self.num_bins + 1))
         E_binwidths = np.diff(E_dist_edges)
         self.E_dist = E_dist_edges[:-1] + (0.5 * E_binwidths)
 
@@ -145,6 +145,7 @@ class Solver:
 
 
         return [nue_n_dist.tolist(), anue_n_dist.tolist()], [nue_J_dist.tolist(), anue_J_dist.tolist()]
+
 
     #TODO: NEEDS TESTING
     def calculate_spectral_rates(self, state : State):
@@ -169,7 +170,7 @@ class Solver:
 
         #Set up Gauss-Legendre quadrature
         quad = bns.cvar.quadrature_default
-        quad.nx = 6
+        quad.nx = 9
         bns.GaussLegendre(quad)
 
         #Load reactions and corrections
@@ -229,20 +230,22 @@ class Solver:
 
             #Create a quadrature, populate it with data for a Gauss-Legendre quadrature
             quad = bns.cvar.quadrature_default
-            quad.nx = 6
+            quad.nx = 9
             bns.GaussLegendre(quad)
 
             #Load reactions and corrections
             opacity_flags = self.opacity_flags
             opacity_pars = self.opacity_pars
 
+            # Compute neutrino distribution parameters assuming equilibrium
+            distr_pars = bns.NuEquilibriumParams(eos_pars)
+
             #Load M1 quantities
             m1_pars = bns.M1Quantities()
+            bns.ComputeM1DensitiesEq(eos_pars, distr_pars, m1_pars)
             m1_pars.chi = state.chi_m1
             m1_pars.n = [x * 1e-21 for x in state.n_m1]
             m1_pars.J = [x * 1e-21 for x in state.J_m1]
-
-            distr_pars = bns.CalculateDistrParamsFromM1(m1_pars, eos_pars)
 
             #Populate global structure using grey_pars
             grey_pars = bns.GreyOpacityParams()
@@ -317,20 +320,20 @@ opacity_flags = {'use_abs_em': True, 'use_pair': True, 'use_brem': False, 'use_i
 opacity_pars = {'use_dU': False, 'use_dm_eff': False, 'use_WM_ab': False, 'use_WM_sc': False, 'use_decay': True, 'brem_implementation': 'GP19', 'neglect_blocking': False, 'use_NN_medium_corr': True}
 
 
-solver = Solver(eos, init_state, opacity_flags, opacity_pars, 1000, None)
+solver = Solver(eos, init_state, opacity_flags, opacity_pars, 100, None)
 rates = solver.calculate_spectral_rates(init_state)
 
 #calculate the average gray number imfp for each species
 nue_kappa = np.array([rate["kappa"][0] for rate in rates])
 anue_kappa = np.array([rate["kappa"][1] for rate in rates])
 
-nue_kappa_0 = np.sum(nue_kappa * np.array(init_state.nu_n_dist[0])) / np.sum(np.array(init_state.nu_n_dist[0]))
-anue_kappa_0 = np.sum(anue_kappa * np.array(init_state.nu_n_dist[1])) / np.sum(np.array(init_state.nu_n_dist[1]))
+nue_kappa_1 = np.sum(nue_kappa * np.array(init_state.nu_J_dist[0])) / np.sum(np.array(init_state.nu_J_dist[0]))
+anue_kappa_1 = np.sum(anue_kappa * np.array(init_state.nu_J_dist[1])) / np.sum(np.array(init_state.nu_J_dist[1]))
 
 gray_rates = solver.calculate_gray_rates(init_state_copy)
 print("--------------------------------------")
-print(f"nue number imfp ratio [gray calculated from spectral vs / bns_nurates gray]: {nue_kappa_0 / (gray_rates["kappa_0_a"][0])}")
-print(f"anue number imfp ratio [gray calculated from spectral / bns_nurates gray]: {anue_kappa_0 / (gray_rates["kappa_0_a"][1])}")
+print(f"nue number imfp ratio [gray calculated from spectral vs / bns_nurates gray]: {nue_kappa_1 / (gray_rates["kappa_a"][0])}")
+print(f"anue number imfp ratio [gray calculated from spectral / bns_nurates gray]: {anue_kappa_1 / (gray_rates["kappa_a"][1])}")
 print("--------------------------------------")
 
 
