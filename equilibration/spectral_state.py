@@ -1,6 +1,6 @@
 class State:
     """Class showing the state of the simulation."""
-    def __init__(self, nb, ye, fluid_e, nu_n_dist, chi_m1, time = 0.0, dU = None):
+    def __init__(self, nb, ye, fluid_e, nu_n_dist = None, chi_m1 = [1/3, 1/3, 1/3, 1/3], time = 0.0, dU = None):
         self.nb = nb                                        # Baryon number density [cm-3]
         self.ye = ye                                        # Electron fraction
         self.xn = 1. - ye                                   # Neutron fraction

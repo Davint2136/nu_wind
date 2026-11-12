@@ -50,8 +50,9 @@ class Solver:
             t = bisect(f, self.table.t[0], self.table.t[-1], disp=True)
         except RuntimeError:
             print("temperature_from_e could not converge to a temperature.")
-        
-        return t
+
+        state.t = t
+        return
     
     def get_potentials(self, state : State):
         """
@@ -73,7 +74,10 @@ class Solver:
         mu_n = mu_b #(Baryon number: 1, Charge number: 0, Lepton number: 0)
         mu_e = mu_l - mu_q  #(Baryon number: 0, Charge number: -1, Lepton number: 1)
 
-        return mu_p, mu_n, mu_e
+        state.mu_p = mu_p
+        state.mu_n = mu_n
+        state.mu_e = mu_e
+        return 
 
     def calculate_corrector_quantities(self, state : State):
         """
@@ -91,15 +95,16 @@ class Solver:
         mn_eff = interp.qK["mn_d"][0, 0, 0] * interp.mn
         mp_eff = interp.qK["mp_d"][0, 0, 0] * interp.mp
         dm_eff = mn_eff - mp_eff
-        return mp_eff, mn_eff, dm_eff
+
+        state.mn_eff = mn_eff
+        state.mp_eff = mp_eff
+        state.dm_eff = dm_eff
+        return 
 
     def fermi_dirac_n(self, energy, mu, t):
         return ((1 / (np.exp((energy - mu) / t) + 1))) * ((energy ** 2) / (2 * np.pi ** 2 )) * (1 / (self.HBARC ** 3)) #needs to be divided by HBARC^3 to be in units of cm^-3
 
     def calculate_dist(self, state : State):
-        state.t = self.temperature_from_e(state)
-        state.mu_p, state.mu_n, state.mu_e = self.get_potentials(state)
-        state.mp_eff, state.mn_eff, state.dm_eff = self.calculate_corrector_quantities(state)
 
         #Calculate nue and anue chemical potentials
         mu_nue = state.mu_p - state.mu_n + state.mu_e
@@ -117,15 +122,14 @@ class Solver:
         nue_J_dist = nue_n_dist * self.E_dist
         anue_J_dist = anue_n_dist * self.E_dist
 
+        state.nu_n_dist = [nue_n_dist, anue_n_dist]
+        state.nu_J_dist = [nue_J_dist, anue_J_dist]
 
-        return [nue_n_dist.tolist(), anue_n_dist.tolist()], [nue_J_dist.tolist(), anue_J_dist.tolist()]
+        return
 
-    #TODO: Something needs to be changed about this function and calculate_dist. We're evolving the neutrino spectrum, so the distribution should only be calculated at the first timestep.
-    #As a result, temperature_from_e, get_potentials, and calculate_corrector_quantities need to be ran independently instead of inside calculate_dist.
+    
     def calculate_spectral_rates(self, state : State):
-        #Calculate number and energy density distributions
-        state.nu_n_dist, state.nu_J_dist = self.calculate_dist(state)
-
+        
         #Calculate total number and energy densities by species for bns_nurates
         state.n_m1 = [np.sum(state.nu_n_dist[0]), np.sum(state.nu_n_dist[1]), 0, 0] #nue, anue, nux, anux
         state.J_m1 = [np.sum(state.nu_J_dist[0]), np.sum(state.nu_J_dist[1]), 0, 0] #nue, anue, nux, anux
@@ -176,30 +180,64 @@ class Solver:
             spectral_rates['kappa_s'] = [x * 1e7 for x in spectral_rates['kappa_s']]
             rates.append(spectral_rates)
 
-        return rates
+        state.rates = rates
+        return
 
-    def step(self, state: State, timestep : float):
+    def step(self, state: State, timestep : float, e_ratio_range : list, ye_ratio_range : list):
         #Calculate number density distribution of incoming neutrinos
-        nue_ext_n = self.nu_external_E[0] / self.E_dist #this may not technically be correct. This assumes that the prescribed distribution has the same energy bins as the calculated ones
-        anue_ext_n = self.nu_external_E[1] / self.E_dist #same goes for here.
+        nue_ext_n = self.nu_external_E[0] / self.E_dist 
+        anue_ext_n = self.nu_external_E[1] / self.E_dist 
 
-        E_before = np.sum(state.J_m1) + state.fluid_e + np.sum(self.nu_external_E[0]) + np.sum(self.nu_external_E[1]) #fluid energy density + total neutrino number density
-        lep_num_before = (state.nb * state.ye) + np.sum(state.n_m1) + np.sum(nue_ext_n) + np.sum(anue_ext_n) #electron density + total neutrino density
+        E_before = np.sum(state.J_m1[0]) + np.sum(state.J_m1[1]) + state.fluid_e + np.sum(self.nu_external_E[0]) + np.sum(self.nu_external_E[1]) #fluid energy density + total neutrino number density
+        lep_num_before = (state.nb * state.ye) + (np.sum(state.n_m1[0]) - np.sum(state.n_m1[1])) + (np.sum(nue_ext_n) - np.sum(anue_ext_n)) #electron density + net neutrino density
 
         #calculate kappa for each species per energy bin, converting to inverse seconds
         kappa_nue = np.array([kappa * c.to("cm/s") for kappa in state.rates['kappa'][0]])
         kappa_anue = np.array([kappa * c.to("cm/s") for kappa in state.rates['kappa'][1]])
 
-        #Find difference in number density distributions over the timestep
-        nue_n_dist_diff = ((np.array(state.nu_n_dist[0]) + ((kappa_nue * timestep) * nue_ext_n)) / (1 + (kappa_nue * timestep))) - state.nu_n_dist[0]
-        anue_n_dist_diff = ((np.array(state.nu_n_dist[1]) + ((kappa_anue * timestep) * anue_ext_n)) / (1 + (kappa_anue * timestep))) - state.nue_n_dist[1]
 
-        #Find difference in baryon energy density over the timestep
-        e_fluid_diff = -np.sum((nue_n_dist_diff + anue_n_dist_diff) * self.E_dist)
+        #Evolve system and check for differences in fluid energy and electron fraction. Recompute with altered timestep if the conditions get too stiff.
+        acceptable_timestep = False
+        while not acceptable_timestep:
+            #Calculate new number density distributions for the two neutrino species
+            new_nue_n_dist = ((np.array(state.nu_n_dist[0]) + ((kappa_nue * timestep) * nue_ext_n)) / (1 + (kappa_nue * timestep)))
+            new_anue_n_dist = ((np.array(state.nu_n_dist[1]) + ((kappa_anue * timestep) * anue_ext_n)) / (1 + (kappa_anue * timestep)))
 
-        #Find difference in electron fraction over the timestep
-        ye_diff = (1 / state.nb) * np.sum(anue_n_dist_diff - nue_n_dist_diff)
+            #Find baryon energy density after timestep
+            new_e_fluid = -np.sum(((new_nue_n_dist - state.nu_n_dist[0]) + (new_anue_n_dist - state.nu_n_dist[1])) * self.E_dist) + state.fluid_e
 
-        #TODO: Calculate total energy density and lepton number density after the step, find error, feed it back into the fluid.
-        #TODO: Generate a new state after making the corrections for energy and lepton number error.
+            #Find electron fraction after the timestep
+            new_ye = ((1 / state.nb) * np.sum((new_anue_n_dist - state.nu_n_dist[1]) - (new_nue_n_dist - state.nu_n_dist[0]))) + state.ye
+
+            #Calculate new total energy density and lepton number density
+            E_after = np.sum(new_nue_n_dist * self.E_dist) + np.sum(new_anue_n_dist * self.E_dist) + new_e_fluid + np.sum(nue_ext_n) + np.sum(anue_ext_n)
+            lep_num_after = (state.nb * new_ye) + np.sum(new_nue_n_dist) + np.sum(new_anue_n_dist) + np.sum(nue_ext_n) + np.sum(anue_ext_n)
+
+            #Calculate energy density and lepton number error
+            E_error = E_after - E_before
+            lep_num_error = lep_num_after - lep_num_before
+
+            #Feed errors back into fluid to enforce conservation laws
+            new_e_fluid += E_error
+            ne_ye += (lep_num_error / state.nb)
+
+            #Calculate ratios of change for matter fields, normalize by 1 
+            e_ratio = 1 - (new_e_fluid - state.fluid_e)
+            ye_ratio = 1 - (new_ye - state.ye)
+
+            #Double or halve timestep as needed
+            if e_ratio < e_ratio_range[0] or ye_ratio < ye_ratio_range[0]:
+                timestep *= 2
+
+            elif e_ratio > e_ratio_range[1] or ye_ratio > ye_ratio_range[1]:
+                timestep /= 2
+
+            else:
+                acceptable_timestep = True
+
+        #Overwrite the current state's variables with the evolved ones
+        state.ye = new_ye
+        state.fluid_e = new_e_fluid
+        state.nu_n_dist = [new_nue_n_dist, new_anue_n_dist]
+        state.time += timestep
         return       
