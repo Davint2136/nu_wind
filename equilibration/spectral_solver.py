@@ -126,7 +126,7 @@ class Solver:
                 state [State]: the state object containing the current simulation conditions
             
             Modifies:
-                state.nu_n_dist [List]: A list of numpy arrays containing the binned distribution of neutrino number densities per species [cm^-3]. The species are ordered [nue, anue].
+                state.nu_n_dist [list]: A list of numpy arrays containing the binned distribution of neutrino number densities per species [cm^-3]. The species are ordered [nue, anue].
 
         """
 
@@ -218,7 +218,7 @@ class Solver:
         state.rates = rates
         return
 
-    def step(self, state: State, timestep : float, e_ratio_range : list, ye_ratio_range : list):
+    def step(self, state: State, timestep : float, e_ratio_range : list, ye_ratio_range : list) -> None:
         """
             An implicit numerical solver that determines the next state of the simulation. Given limits on the change in electron fraction and baryon energy density and a timestep guess, determines
             an appropriate timestep and updates the state with the fluid's properties after the timestep.
@@ -235,7 +235,7 @@ class Solver:
                 state.nu_n_dist [list]: a list containing the per-species neutrino number density distributions, ordered such that [nue, anue]
                 state.time [float]: the current simulation time [s]
         """
-        
+
         #Calculate number density distribution of incoming neutrinos
         nue_ext_n = self.nu_external_E[0] / self.E_dist 
         anue_ext_n = self.nu_external_E[1] / self.E_dist 
