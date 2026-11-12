@@ -17,7 +17,6 @@ class Solver:
 
     def __init__(self, table : Table, state : State, opacity_flags : dict, opacity_pars : dict, num_bins : float, nu_external_E : list):
         self.table = table
-        self.states = [state]
         self.opacity_flags = opacity_flags
         self.opacity_pars = opacity_pars
         self.num_bins = num_bins
@@ -25,18 +24,15 @@ class Solver:
         self.E_dist = None
 
 
-    def temperature_from_e(self, state : State):
+    def temperature_from_e(self, state : State) -> None:
         """
             Given an eos table, nb, ye, and energy density e, calculates the temperature of the fluid. Uses linear interpolation.
 
             Inputs:
-                table [compose.eos.Table]: An EOS table whose nb, yq, and t arrays are not empty. A non-empty thermo["Q7"] table must exist in the EOS Table object as well.
-                nb [np.NDArray]: A 1D array consisting of one baryon number density in cm^-3.
-                ye [np.NDArray]: A 1D array consisting of one charge fraction.
-                e_val [float]: The fluid's energy density in MeV/cm^3.
+                state [State]: the state object containing the current simulation conditions.
 
-            Outputs:
-                t [float]: The fluid temperature in MeV.
+            Modifies:
+                state.t [float]: the calculated temperature [MeV]
         """
 
         log_e = np.log((self.table.thermo["Q7"] + 1) * self.table.mn * state.nb * 1e-39)
@@ -54,14 +50,17 @@ class Solver:
         state.t = t
         return
     
-    def get_potentials(self, state : State):
+    def get_potentials(self, state : State) -> None:
         """
             Calculates the proton, neutron, and electron chemical potentials for the current state.
 
-            Outputs:
-                mu_p [float]: The proton chemical potential [MeV]
-                mu_n [float]: The neutron chemical potential [MeV]
-                mu_e [float]: The electron chemical potential [MeV]
+            Inputs:
+                state [State]: the state object containing the current simulation conditions
+
+            Modifies:
+                state.mu_p [float]: the state's proton chemical potential [MeV]
+                state.mu_n [float]: the state's neutron chemical potential [MeV]
+                state.mu_e [float]: the state's electron chemical potential [MeV]
         """
 
 
@@ -79,14 +78,17 @@ class Solver:
         state.mu_e = mu_e
         return 
 
-    def calculate_corrector_quantities(self, state : State):
+    def calculate_corrector_quantities(self, state : State) -> None:
         """
             Calulates quantities needed for BNS_NURATES corrections that are relevant at high density. 
 
-            Outputs:
-                mp_eff [float]: Proton Dirac effective mass [MeV]
-                pn_eff [float]: Neutron Dirac effective mass [MeV]
-                dm_eff [float]: The effective mass difference between neutrons and protons
+            Inputs:
+                state [State]: the state object containing the current simulation conditions
+
+            Modifies:
+                state.mp_eff [float]: Proton Dirac effective mass [MeV]
+                state.mn_eff [float]: Neutron Dirac effective mass [MeV]
+                state.dm_eff [float]: The effective mass difference between neutrons and protons [MeV]
         """
 
         #Use eos.qK to find dirac effective masses to calculate dm_eff, don't attempt dU for now
@@ -101,10 +103,34 @@ class Solver:
         state.dm_eff = dm_eff
         return 
 
-    def fermi_dirac_n(self, energy, mu, t):
+    def fermi_dirac_n(self, energy : float, mu : float, t : float) -> float:
+        """
+            For a given temperature, chemical potential, and energy, calculates the number density of neutrinos according to the Fermi-Dirac distribution.
+
+            Inputs:
+                energy: neutrino energy [MeV]
+                mu:     chemical potential [MeV]
+                t:      temperature [MeV]
+            
+            Outputs:
+                [float]: the neutrino number density for the specified energy, chemical potential, and temperature. Each bin is in units of cm^-3
+        """
         return ((1 / (np.exp((energy - mu) / t) + 1))) * ((energy ** 2) / (2 * np.pi ** 2 )) * (1 / (self.HBARC ** 3)) #needs to be divided by HBARC^3 to be in units of cm^-3
 
-    def calculate_dist(self, state : State):
+    def calculate_dist(self, state : State) -> None:
+        """
+            Calculates the energy and number density distributions across the electron neutrinos and electron antineutrinos. This function assumes the temperature, potentials, effective masses,
+            and effective mass differences have already been calculated for the current state.
+
+            Inputs:
+                state [State]: the state object containing the current simulation conditions
+            
+            Modifies:
+                state.nu_n_dist [List]: A list of numpy arrays containing the binned distribution of neutrino number densities per species [cm^-3]. The species are ordered [nue, anue].
+
+        """
+
+        #TODO: Needs error handling if temperature, potentials, effective masses, or effective mass differences haven't been calculated yet.
 
         #Calculate nue and anue chemical potentials
         mu_nue = state.mu_p - state.mu_n + state.mu_e
@@ -128,7 +154,16 @@ class Solver:
         return
 
     
-    def calculate_spectral_rates(self, state : State):
+    def calculate_spectral_rates(self, state : State) -> None:
+        """
+            Calculates the neutrino-matter reaction rates for each energy bin in the neutrino distributions. 
+
+            Inputs:
+                state [State]: the state object containing the current simulation conditions.
+            
+            Modifies:
+                state.rates [List]: A list of dictionaries, where each dictionary contains the species-specific reaction rates for a particular energy bin of the neutrino distributions.
+        """
         
         #Calculate total number and energy densities by species for bns_nurates
         state.n_m1 = [np.sum(state.nu_n_dist[0]), np.sum(state.nu_n_dist[1]), 0, 0] #nue, anue, nux, anux
@@ -184,6 +219,23 @@ class Solver:
         return
 
     def step(self, state: State, timestep : float, e_ratio_range : list, ye_ratio_range : list):
+        """
+            An implicit numerical solver that determines the next state of the simulation. Given limits on the change in electron fraction and baryon energy density and a timestep guess, determines
+            an appropriate timestep and updates the state with the fluid's properties after the timestep.
+
+            Inputs:
+                state [State]: the state object containing the current simulation state.
+                timestep [float]: the simulation timestep [s]. Dynamically changes depending on how quickly the fluid energy density and electron fraction change to preserve stability
+                e_ratio_range [list]: a list containing the desired range dictating the acceptable change in fluid energy density, expressed as a ratio normalized around 1
+                ye_ratio_range [list]: a list containing the desired range dictating the acceptable change in electron fraction, expressed as a ratio normalized around 1
+            
+            Modifies:
+                state.fluid_e [float]: the fluid's baryon energy density [MeV cm^-3]
+                state.ye [float]: the fraction of electrons to the total number of baryons present in the fluid
+                state.nu_n_dist [list]: a list containing the per-species neutrino number density distributions, ordered such that [nue, anue]
+                state.time [float]: the current simulation time [s]
+        """
+        
         #Calculate number density distribution of incoming neutrinos
         nue_ext_n = self.nu_external_E[0] / self.E_dist 
         anue_ext_n = self.nu_external_E[1] / self.E_dist 
@@ -225,7 +277,7 @@ class Solver:
             e_ratio = 1 - (new_e_fluid - state.fluid_e)
             ye_ratio = 1 - (new_ye - state.ye)
 
-            #Double or halve timestep as needed
+            #Double or halve timestep as needed. Small changes allow for larger timesteps, whereas large changes should be constrained by smaller timestep values.
             if e_ratio < e_ratio_range[0] or ye_ratio < ye_ratio_range[0]:
                 timestep *= 2
 
